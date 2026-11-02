@@ -1,4 +1,4 @@
-# merkletree
+# merkle-store
 
 A content-addressed Merkle tree that maps file names to blobs, stored through a
 pluggable async backend. Runtime-agnostic: it depends only on `futures`.
@@ -6,7 +6,7 @@ pluggable async backend. Runtime-agnostic: it depends only on `futures`.
 ## Example
 
 ```rust
-use merkletree::{MerkleStore, TreeParameters, memstore::MemoryStore};
+use merkle_store::{MerkleStore, TreeParameters, memstore::MemoryStore};
 
 let store = MerkleStore::new(
     MemoryStore::new(),

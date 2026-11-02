@@ -6,7 +6,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use merkletree::ContentHash;
+use merkle_store::ContentHash;
 
 /// A fresh, empty directory under `target/test-tmp/`.
 pub fn temp_dir(name: &str) -> PathBuf {

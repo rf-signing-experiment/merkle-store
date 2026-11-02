@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use futures::{FutureExt, executor::block_on, lock::Mutex};
-use merkletree::{
+use merkle_store::{
     ContentHash, MerkleStore, TreeEnumerator, TreeParameters, TreeReader, TreeWriter, compute_hash,
     memstore::MemoryStore,
 };
