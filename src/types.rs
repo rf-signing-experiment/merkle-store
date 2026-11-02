@@ -19,6 +19,14 @@ impl Node {
         borsh::from_slice(&data).unwrap()
     }
 
+    /// True for a leaf with no names or an index node with no children.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Node::Index(index) => index.is_empty(),
+            Node::Leaf(leaf) => leaf.is_empty(),
+        }
+    }
+
     pub fn as_leaf(&self) -> Option<&LeafNode> {
         match self {
             Node::Leaf(leaf_node) => Some(leaf_node),
@@ -92,14 +100,10 @@ impl Debug for IndexNode {
     }
 }
 
-#[derive(Clone, BorshDeserialize, BorshSerialize)]
+#[derive(Clone, Default, BorshDeserialize, BorshSerialize)]
 pub struct LeafNode(Vec<(String, ContentHash)>);
 
 impl LeafNode {
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
     pub fn get(&self, key: &str) -> Option<&ContentHash> {
         self.0
             .binary_search_by_key(&key, |v| &v.0)
@@ -159,7 +163,7 @@ impl Debug for ContentHash {
 impl Display for ContentHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut output = [0u8; ContentHash::SIZE * 2];
-        hex::encode_to_slice(&self.0, &mut output).unwrap();
+        hex::encode_to_slice(self.0, &mut output).unwrap();
         f.write_str(std::str::from_utf8(&output).unwrap())
     }
 }
@@ -170,10 +174,10 @@ impl From<[u8; ContentHash::SIZE]> for ContentHash {
     }
 }
 
-impl TryFrom<&str> for ContentHash {
-    type Error = FromHexError;
+impl std::str::FromStr for ContentHash {
+    type Err = FromHexError;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         let mut data = [0u8; ContentHash::SIZE];
         hex::decode_to_slice(value.as_bytes(), &mut data)?;
         Ok(ContentHash(data))

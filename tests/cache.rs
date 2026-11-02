@@ -158,7 +158,7 @@ fn fs_cache_store_end_to_end() {
         store.commit().await.unwrap();
 
         // The root node was cached in the local directory.
-        let root = store.root().await.unwrap();
+        let root = store.root().unwrap();
         assert!(object_path(&dir, &root, false).exists());
 
         // GC deletes through the cache, including objects it never cached.

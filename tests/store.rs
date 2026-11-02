@@ -175,7 +175,7 @@ fn failed_commit_keeps_pending_writes() {
             .fail
             .store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(store.commit().await.is_err());
-        assert!(!store.has_root().await);
+        assert_eq!(store.root(), None);
 
         store
             .backend()
@@ -353,14 +353,14 @@ fn delete_missing_name_changes_nothing() {
         let store = store(2, 4);
         store.delete("nothing").await.unwrap();
         store.commit().await.unwrap();
-        assert_eq!(store.root().await, None);
+        assert_eq!(store.root(), None);
 
         store.put_object("a", b"a".to_vec()).await.unwrap();
         store.commit().await.unwrap();
-        let root = store.root().await;
+        let root = store.root();
         store.delete("nothing").await.unwrap();
         store.commit().await.unwrap();
-        assert_eq!(store.root().await, root);
+        assert_eq!(store.root(), root);
     });
 }
 
@@ -376,7 +376,7 @@ fn deleting_everything_clears_root() {
             }
             store.commit().await.unwrap();
 
-            assert_eq!(store.root().await, None);
+            assert_eq!(store.root(), None);
             assert!(store.enumerate().await.unwrap().is_empty());
             store.gc().await.unwrap();
             assert!(store.backend().enumerate_all().await.unwrap().is_empty());
@@ -405,7 +405,7 @@ fn delete_gives_same_tree_as_never_adding() {
         put_all(&b, 5..10).await;
         b.commit().await.unwrap();
 
-        assert_eq!(a.root().await, b.root().await);
+        assert_eq!(a.root(), b.root());
     });
 }
 

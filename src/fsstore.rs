@@ -50,15 +50,13 @@ impl TreeReader for FsStore {
     type Error = std::io::Error;
 
     async fn read(&self, hash: &ContentHash, is_data: bool) -> IoResult<Option<Vec<u8>>> {
-        let path = self.object_path(&hash, is_data);
+        let path = self.object_path(hash, is_data);
         trace!("Reading object {}", path.display());
-        let data = match std::fs::read(&path) {
-            Ok(data) => Some(data),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
-
-        Ok(data)
+        match std::fs::read(&path) {
+            Ok(data) => Ok(Some(data)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -86,7 +84,7 @@ impl TreeEnumerator for FsStore {
         let objects_dir = self.root.join(TREE);
         for entry in std::fs::read_dir(objects_dir)? {
             // Skips anything that isn't a hash, like leftover `.tmp` files.
-            if let Some(hash) = parse_hash(&entry?.file_name().to_string_lossy()) {
+            if let Ok(hash) = entry?.file_name().to_string_lossy().parse() {
                 all.insert((hash, false));
             }
         }
@@ -100,7 +98,7 @@ impl TreeEnumerator for FsStore {
                         pfx.file_name().to_string_lossy(),
                         entry?.file_name().to_string_lossy()
                     );
-                    if let Some(hash) = parse_hash(&hash) {
+                    if let Ok(hash) = hash.parse() {
                         all.insert((hash, true));
                     }
                 }
@@ -108,8 +106,4 @@ impl TreeEnumerator for FsStore {
         }
         Ok(all)
     }
-}
-
-fn parse_hash(name: &str) -> Option<ContentHash> {
-    ContentHash::try_from(name).ok()
 }

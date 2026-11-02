@@ -10,18 +10,9 @@ use std::sync::Mutex as SyncMutex;
 
 type Slot<V> = Arc<Mutex<Option<Arc<V>>>>;
 
+#[derive(Default)]
 pub struct OneFlightCache<K, V> {
     cache: SyncMutex<HashMap<K, Slot<V>>>,
-}
-
-impl<K, V> Default for OneFlightCache<K, V>
-where
-    K: Hash + Eq + Clone,
-    V: Send + Sync,
-{
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl<K, V> OneFlightCache<K, V>

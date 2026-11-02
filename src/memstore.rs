@@ -6,39 +6,23 @@ use std::{
 
 use crate::{TreeEnumerator, TreeReader, TreeWriter, types::ContentHash};
 
+/// Keeps objects in memory, keyed by `(hash, is_data)`.
+#[derive(Default)]
 pub struct MemoryStore {
-    data: Mutex<HashMap<ContentHash, Vec<u8>>>,
-    tree: Mutex<HashMap<ContentHash, Vec<u8>>>,
-}
-
-impl Default for MemoryStore {
-    fn default() -> Self {
-        Self::new()
-    }
+    objects: Mutex<HashMap<(ContentHash, bool), Vec<u8>>>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
-        Self {
-            data: Mutex::new(HashMap::new()),
-            tree: Mutex::new(HashMap::new()),
-        }
+        Self::default()
     }
 }
 
 impl TreeReader for MemoryStore {
     type Error = Infallible;
 
-    async fn read(
-        &self,
-        hash: &ContentHash,
-        is_data: bool,
-    ) -> Result<Option<Vec<u8>>, Self::Error> {
-        if is_data {
-            Ok(self.data.lock().unwrap().get(hash).cloned())
-        } else {
-            Ok(self.tree.lock().unwrap().get(hash).cloned())
-        }
+    async fn read(&self, hash: &ContentHash, is_data: bool) -> Result<Option<Vec<u8>>, Infallible> {
+        Ok(self.objects.lock().unwrap().get(&(*hash, is_data)).cloned())
     }
 }
 
@@ -48,34 +32,19 @@ impl TreeWriter for MemoryStore {
         hash: &ContentHash,
         data: Vec<u8>,
         is_data: bool,
-    ) -> Result<(), Self::Error> {
-        if is_data {
-            self.data.lock().unwrap().insert(*hash, data);
-        } else {
-            self.tree.lock().unwrap().insert(*hash, data);
-        }
+    ) -> Result<(), Infallible> {
+        self.objects.lock().unwrap().insert((*hash, is_data), data);
         Ok(())
     }
 
-    async fn delete(&self, hash: &ContentHash, is_data: bool) -> Result<(), Self::Error> {
-        if is_data {
-            self.data.lock().unwrap().remove(hash);
-        } else {
-            self.tree.lock().unwrap().remove(hash);
-        }
+    async fn delete(&self, hash: &ContentHash, is_data: bool) -> Result<(), Infallible> {
+        self.objects.lock().unwrap().remove(&(*hash, is_data));
         Ok(())
     }
 }
 
 impl TreeEnumerator for MemoryStore {
-    async fn enumerate_all(&self) -> Result<HashSet<(ContentHash, bool)>, Self::Error> {
-        let mut result = HashSet::new();
-        for k in self.tree.lock().unwrap().keys() {
-            result.insert((*k, false));
-        }
-        for k in self.data.lock().unwrap().keys() {
-            result.insert((*k, true));
-        }
-        Ok(result)
+    async fn enumerate_all(&self) -> Result<HashSet<(ContentHash, bool)>, Infallible> {
+        Ok(self.objects.lock().unwrap().keys().copied().collect())
     }
 }

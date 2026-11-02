@@ -17,7 +17,7 @@ let store = MerkleStore::new(
 store.put_object("hello.txt", b"hi".to_vec()).await?;
 store.commit().await?;                         // builds the new tree, swaps the root
 
-let root = store.root().await;                 // persist this yourself
+let root = store.root();                       // persist this yourself
 assert_eq!(store.get_file("hello.txt").await?, Some(b"hi".to_vec()));
 ```
 
