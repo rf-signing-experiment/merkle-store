@@ -1,0 +1,12 @@
+[package]
+name = "merkletree"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+borsh = { version = "1.6.1", features = ["derive"] }
+futures = "0.3.31"
+hex = "0.4.3"
+sha2 = "0.11"
+thiserror = "2.0.18"
+tracing = "0.1"
