@@ -462,11 +462,5 @@ impl<B: TreeEnumerator> MerkleStore<B> {
 
 /// Computes the `ContentHash` of `data`, as used for every stored object.
 pub fn compute_hash(data: &[u8]) -> ContentHash {
-    // Size class: 0 for empty data, otherwise ilog2(len) + 1 (at most 64).
-    let size_class = data.len().checked_ilog2().map_or(0, |l| l + 1) as u8;
-    let mut out = [0u8; 33];
-    out[0] = size_class;
-    let output: [u8; 32] = Sha256::digest(data).into();
-    out[1..].copy_from_slice(&output);
-    out.into()
+    ContentHash::from_sha256(data.len(), Sha256::digest(data).into())
 }

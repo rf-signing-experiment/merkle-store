@@ -21,10 +21,10 @@ pub fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// Where the filesystem backends store an object: `data/<2 hex>/<rest>` for
-/// data blobs, `tree/<hex>` for tree nodes.
+/// Where the filesystem backends store an object, by its SHA-256 in hex:
+/// `data/<2 hex>/<rest>` for data blobs, `tree/<hex>` for tree nodes.
 pub fn object_path(root: &Path, hash: &ContentHash, is_data: bool) -> PathBuf {
-    let hex = hash.to_string();
+    let hex = hex::encode(hash.hash());
     if is_data {
         root.join("data").join(&hex[0..2]).join(&hex[2..])
     } else {

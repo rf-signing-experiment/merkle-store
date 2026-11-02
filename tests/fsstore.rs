@@ -115,7 +115,9 @@ fn test_object_layout() {
     let store = FsStore::new(&temp).unwrap();
     let data = b"abcd";
     let hash = compute_hash(data);
-    let hex = hash.to_string();
+    // Files are named by the plain SHA-256, without the size class byte.
+    let hex = "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589";
+    assert_eq!(&hash.to_string()[2..], hex);
 
     block_on(async {
         store.write(&hash, data.to_vec(), true).await.unwrap();
@@ -126,5 +128,31 @@ fn test_object_layout() {
         fs::read(temp.join("data").join(&hex[0..2]).join(&hex[2..])).unwrap(),
         data
     );
-    assert_eq!(fs::read(temp.join("tree").join(&hex)).unwrap(), data);
+    assert_eq!(fs::read(temp.join("tree").join(hex)).unwrap(), data);
+}
+
+#[test]
+fn test_enumerate_all_restores_size_class() {
+    let temp = temp_dir();
+    let store = FsStore::new(&temp).unwrap();
+    // Lengths 0, 1 and 1000 have different size classes.
+    let objects = [vec![], vec![7], vec![1; 1000]];
+    block_on(async {
+        for data in &objects {
+            store
+                .write(&compute_hash(data), data.clone(), true)
+                .await
+                .unwrap();
+            store
+                .write(&compute_hash(data), data.clone(), false)
+                .await
+                .unwrap();
+        }
+        let all = store.enumerate_all().await.unwrap();
+        let expected: HashSet<_> = objects
+            .iter()
+            .flat_map(|d| [(compute_hash(d), true), (compute_hash(d), false)])
+            .collect();
+        assert_eq!(all, expected);
+    });
 }

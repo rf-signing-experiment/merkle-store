@@ -47,7 +47,7 @@ To reopen a tree, construct a store over the same backend and call
 | Backend | Description |
 |---|---|
 | `memstore::MemoryStore` | In-memory hash maps, for tests. |
-| `fsstore::FsStore` | Files under `tree/<hex>` and `data/<xx>/<rest>`, written atomically. |
+| `fsstore::FsStore` | Files named by their SHA-256: `tree/<sha256>` and `data/<xx>/<rest>`, written atomically. |
 | `cache::Cache<L, R>` | Backend `L` as a local cache in front of backend `R`. Bad cache entries are detected and fetched again. `cache::FsCache<R>` uses an `FsStore` directory as the cache. |
 
 Implement `TreeReader` for read-only access, `TreeWriter` for writes, and

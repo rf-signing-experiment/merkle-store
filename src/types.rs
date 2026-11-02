@@ -187,6 +187,16 @@ impl std::str::FromStr for ContentHash {
 impl ContentHash {
     const SIZE: usize = 33;
 
+    /// Builds the hash of content with length `len` and SHA-256 `sha256`.
+    /// The leading size class byte depends only on the length: 0 for empty
+    /// content, otherwise `ilog2(len) + 1` (at most 64).
+    pub(crate) fn from_sha256(len: usize, sha256: [u8; 32]) -> Self {
+        let mut out = [0u8; Self::SIZE];
+        out[0] = len.checked_ilog2().map_or(0, |l| l + 1) as u8;
+        out[1..].copy_from_slice(&sha256);
+        Self(out)
+    }
+
     pub fn size_limit(&self) -> usize {
         1 << self.0[0].min(usize::BITS as u8)
     }

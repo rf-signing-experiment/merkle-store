@@ -1,5 +1,5 @@
 //! Async function cache.
-//! 
+//!
 //! Ensures that only one execution of a function is in flight for a given key at
 //! a time.
 

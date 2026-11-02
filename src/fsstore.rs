@@ -1,5 +1,7 @@
 use std::{
     collections::HashSet,
+    fs::DirEntry,
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -10,8 +12,11 @@ use crate::{TreeEnumerator, TreeReader, TreeWriter, types::ContentHash};
 const TREE: &str = "tree";
 const DATA: &str = "data";
 
-/// Stores objects as files: tree nodes under `tree/<hex>`, data blobs under
-/// `data/<first 2 hex>/<rest>`.
+/// Stores objects as files named by their SHA-256 in hex: tree nodes under
+/// `tree/<sha256>`, data blobs under `data/<first 2 hex>/<rest>`.
+///
+/// The `ContentHash` size class byte isn't part of the name. It depends only
+/// on the content's length, so `enumerate_all` recomputes it from the file size.
 pub struct FsStore {
     root: PathBuf,
 }
@@ -27,12 +32,27 @@ impl FsStore {
     }
 
     fn object_path(&self, hash: &ContentHash, is_data: bool) -> PathBuf {
-        let hash = hash.to_string();
+        let hex = hex::encode(hash.hash());
         if is_data {
-            self.root.join(DATA).join(&hash[0..2]).join(&hash[2..])
+            self.root.join(DATA).join(&hex[0..2]).join(&hex[2..])
         } else {
-            self.root.join(TREE).join(hash)
+            self.root.join(TREE).join(hex)
         }
+    }
+}
+
+/// Rebuilds the `ContentHash` of the file `entry`, whose SHA-256 in hex is
+/// `hex`. Returns `None` if `hex` isn't a SHA-256 (like a leftover `.tmp`
+/// file) or the file is already gone.
+fn file_hash(hex: &str, entry: &DirEntry) -> IoResult<Option<ContentHash>> {
+    let mut sha256 = [0u8; 32];
+    if hex::decode_to_slice(hex, &mut sha256).is_err() {
+        return Ok(None);
+    }
+    match entry.metadata() {
+        Ok(meta) => Ok(Some(ContentHash::from_sha256(meta.len() as usize, sha256))),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -54,7 +74,7 @@ impl TreeReader for FsStore {
         trace!("Reading object {}", path.display());
         match std::fs::read(&path) {
             Ok(data) => Ok(Some(data)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -72,7 +92,7 @@ impl TreeWriter for FsStore {
     async fn delete(&self, hash: &ContentHash, is_data: bool) -> IoResult<()> {
         let path = self.object_path(hash, is_data);
         match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            Err(e) if e.kind() != ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         }
     }
@@ -83,8 +103,8 @@ impl TreeEnumerator for FsStore {
         let mut all = HashSet::new();
         let objects_dir = self.root.join(TREE);
         for entry in std::fs::read_dir(objects_dir)? {
-            // Skips anything that isn't a hash, like leftover `.tmp` files.
-            if let Ok(hash) = entry?.file_name().to_string_lossy().parse() {
+            let entry = entry?;
+            if let Some(hash) = file_hash(&entry.file_name().to_string_lossy(), &entry)? {
                 all.insert((hash, false));
             }
         }
@@ -93,12 +113,13 @@ impl TreeEnumerator for FsStore {
             let pfx = entry?;
             if pfx.metadata()?.is_dir() {
                 for entry in std::fs::read_dir(pfx.path())? {
-                    let hash = format!(
+                    let entry = entry?;
+                    let hex = format!(
                         "{}{}",
                         pfx.file_name().to_string_lossy(),
-                        entry?.file_name().to_string_lossy()
+                        entry.file_name().to_string_lossy()
                     );
-                    if let Ok(hash) = hash.parse() {
+                    if let Some(hash) = file_hash(&hex, &entry)? {
                         all.insert((hash, true));
                     }
                 }
