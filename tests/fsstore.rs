@@ -41,7 +41,7 @@ fn test_enumerate_skips_temp_files() {
 }
 
 #[test]
-fn test_write_read_leaf() {
+fn test_write_read_data() {
     let temp = temp_dir();
     let store = FsStore::new(&temp).unwrap();
     let data = b"hello world";
@@ -57,7 +57,7 @@ fn test_write_read_leaf() {
 }
 
 #[test]
-fn test_write_read_non_leaf() {
+fn test_write_read_node() {
     let temp = temp_dir();
     let store = FsStore::new(&temp).unwrap();
     let data = b"{\"key\": \"value\"}";

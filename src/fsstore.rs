@@ -5,12 +5,13 @@ use std::{
 
 use tracing::trace;
 
-use crate::{
-    TreeEnumerator, TreeReader, TreeWriter,
-    fsutil::{self, DATA, TREE},
-    types::ContentHash,
-};
+use crate::{TreeEnumerator, TreeReader, TreeWriter, types::ContentHash};
 
+const TREE: &str = "tree";
+const DATA: &str = "data";
+
+/// Stores objects as files: tree nodes under `tree/<hex>`, data blobs under
+/// `data/<first 2 hex>/<rest>`.
 pub struct FsStore {
     root: PathBuf,
 }
@@ -20,13 +21,29 @@ type IoResult<T> = std::result::Result<T, std::io::Error>;
 impl FsStore {
     pub fn new(root: impl AsRef<Path>) -> IoResult<Self> {
         let root = root.as_ref().to_path_buf();
-        fsutil::create_layout(&root)?;
+        std::fs::create_dir_all(root.join(TREE))?;
+        std::fs::create_dir_all(root.join(DATA))?;
         Ok(Self { root })
     }
 
     fn object_path(&self, hash: &ContentHash, is_data: bool) -> PathBuf {
-        fsutil::object_path(&self.root, hash, is_data)
+        let hash = hash.to_string();
+        if is_data {
+            self.root.join(DATA).join(&hash[0..2]).join(&hash[2..])
+        } else {
+            self.root.join(TREE).join(hash)
+        }
     }
+}
+
+/// Writes `data` to `path` via `<path>.tmp` and a rename, so `path` never
+/// holds a partial file.
+fn write_atomic(path: &Path, data: &[u8]) -> IoResult<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)
 }
 
 impl TreeReader for FsStore {
@@ -49,15 +66,17 @@ impl TreeWriter for FsStore {
     async fn write(&self, hash: &ContentHash, data: Vec<u8>, is_data: bool) -> IoResult<()> {
         let path = self.object_path(hash, is_data);
         if !path.exists() {
-            fsutil::write_atomic(&path, &data)?;
+            write_atomic(&path, &data)?;
         }
         Ok(())
     }
 
     async fn delete(&self, hash: &ContentHash, is_data: bool) -> IoResult<()> {
-        let path = self.object_path(&hash, is_data);
-        std::fs::remove_file(&path)?;
-        Ok(())
+        let path = self.object_path(hash, is_data);
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
     }
 }
 

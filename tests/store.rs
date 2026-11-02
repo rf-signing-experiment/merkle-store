@@ -2,15 +2,15 @@ use std::collections::HashSet;
 
 use futures::{FutureExt, executor::block_on, lock::Mutex};
 use merkletree::{
-    ContentHash, RwMerkleStore, TreeEnumerator, TreeParameters, TreeReader, TreeWriter,
-    compute_hash, memstore::MemoryStore,
+    ContentHash, MerkleStore, TreeEnumerator, TreeParameters, TreeReader, TreeWriter, compute_hash,
+    memstore::MemoryStore,
 };
 
-fn store(depth: u8, breadth: u8) -> RwMerkleStore<MemoryStore> {
-    RwMerkleStore::new(MemoryStore::new(), 4, TreeParameters { depth, breadth })
+fn store(depth: u8, breadth: u8) -> MerkleStore<MemoryStore> {
+    MerkleStore::new(MemoryStore::new(), 4, TreeParameters { depth, breadth })
 }
 
-async fn get(store: &RwMerkleStore<impl TreeWriter>, name: &str) -> Option<Vec<u8>> {
+async fn get(store: &MerkleStore<impl TreeWriter>, name: &str) -> Option<Vec<u8>> {
     store.get_file(name).await.unwrap()
 }
 
@@ -125,7 +125,7 @@ impl TreeWriter for Gated {
 #[test]
 fn readers_are_not_blocked_by_commit() {
     block_on(async {
-        let store = RwMerkleStore::new(
+        let store = MerkleStore::new(
             Gated::default(),
             1,
             TreeParameters {
@@ -161,7 +161,7 @@ fn readers_are_not_blocked_by_commit() {
 #[test]
 fn failed_commit_keeps_pending_writes() {
     block_on(async {
-        let store = RwMerkleStore::new(
+        let store = MerkleStore::new(
             Gated::default(),
             1,
             TreeParameters {
@@ -189,7 +189,7 @@ fn failed_commit_keeps_pending_writes() {
 #[test]
 fn cancelled_commit_keeps_pending_writes() {
     block_on(async {
-        let store = RwMerkleStore::new(
+        let store = MerkleStore::new(
             Gated::default(),
             1,
             TreeParameters {
@@ -245,7 +245,7 @@ fn gc_keeps_live_and_pending_objects() {
 #[test]
 fn test_memory_store() {
     futures::executor::block_on(async {
-        let store = RwMerkleStore::new(
+        let store = MerkleStore::new(
             MemoryStore::new(),
             1,
             TreeParameters {
@@ -283,7 +283,7 @@ fn test_memory_store() {
 #[test]
 fn multiple_files() {
     futures::executor::block_on(async {
-        let store = RwMerkleStore::new(
+        let store = MerkleStore::new(
             MemoryStore::new(),
             1,
             TreeParameters {

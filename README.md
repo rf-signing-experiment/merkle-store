@@ -6,9 +6,9 @@ pluggable async backend. Runtime-agnostic: it depends only on `futures`.
 ## Example
 
 ```rust
-use merkletree::{RwMerkleStore, TreeParameters, memstore::MemoryStore};
+use merkletree::{MerkleStore, TreeParameters, memstore::MemoryStore};
 
-let store = RwMerkleStore::new(
+let store = MerkleStore::new(
     MemoryStore::new(),
     8,                                         // max concurrent writes per tree level
     TreeParameters { depth: 2, breadth: 8 },   // 2 index levels of 256 slots each
@@ -34,7 +34,7 @@ To reopen a tree, construct a store over the same backend and call
 - **Writes** are two-phase: `put_object` uploads the blob right away and queues
   the name; `commit` rewrites only the affected leaves and index nodes
   (copy-on-write) and then swaps the root.
-- **GC** (`RwMerkleStore::gc`) deletes every object not reachable from the
+- **GC** (`MerkleStore::gc`) deletes every object not reachable from the
   current root or from an uncommitted `put_object`, including objects that
   only older roots reference. It takes `&mut self`, so it can't overlap with
   writes on the same store. Nothing stops another process from writing to the
@@ -46,10 +46,11 @@ To reopen a tree, construct a store over the same backend and call
 |---|---|
 | `memstore::MemoryStore` | In-memory hash maps, for tests. |
 | `fsstore::FsStore` | Files under `tree/<hex>` and `data/<xx>/<rest>`, written atomically. |
-| `fscache::FsCache<B>` | A local directory cache in front of another backend. Bad cache entries are detected and fetched again. |
+| `cache::Cache<L, R>` | Backend `L` as a local cache in front of backend `R`. Bad cache entries are detected and fetched again. `cache::FsCache<R>` uses an `FsStore` directory as the cache. |
 
 Implement `TreeReader` for read-only access, `TreeWriter` for writes, and
-`TreeEnumerator` to enable GC.
+`TreeEnumerator` to enable GC. `MerkleStore<B>` offers whichever methods
+the backend supports.
 
 ## Status
 

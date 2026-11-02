@@ -1,6 +1,5 @@
-pub mod fscache;
+pub mod cache;
 pub mod fsstore;
-mod fsutil;
 pub mod memstore;
 pub mod oneflight;
 mod types;
@@ -50,10 +49,15 @@ where
     Backend(#[from] T),
 }
 
+/// Read access to a backend.
+///
+/// Every method takes an `is_data` flag: `true` for file contents (data
+/// blobs), `false` for serialized tree nodes. Backends keep the two in
+/// separate namespaces, so the same hash can exist in both.
 pub trait TreeReader {
     type Error: Display + Debug + 'static;
 
-    /// Read data by hash.
+    /// Reads an object by hash. Returns `None` if it doesn't exist.
     fn read(
         &self,
         hash: &ContentHash,
@@ -62,7 +66,8 @@ pub trait TreeReader {
 }
 
 pub trait TreeWriter: TreeReader {
-    /// Write data into the store with the given hash.
+    /// Writes an object under the given hash. Writing an object that
+    /// already exists is not an error.
     fn write(
         &self,
         hash: &ContentHash,
@@ -70,7 +75,7 @@ pub trait TreeWriter: TreeReader {
         is_data: bool,
     ) -> impl Future<Output = Result<(), Self::Error>>;
 
-    /// Delete an object.
+    /// Deletes an object. Deleting a missing object is not an error.
     fn delete(
         &self,
         hash: &ContentHash,
@@ -85,16 +90,16 @@ pub trait TreeEnumerator: TreeWriter {
     ) -> impl std::future::Future<Output = Result<HashSet<(ContentHash, bool)>, Self::Error>>;
 }
 
-pub struct RoMerkleStore<B: TreeReader> {
+/// A Merkle tree of named files, stored through backend `B`.
+///
+/// Reading needs `B: TreeReader`, writing needs `B: TreeWriter`, and GC needs
+/// `B: TreeEnumerator`.
+pub struct MerkleStore<B> {
     backend: B,
     parallel: usize,
+    params: TreeParameters,
     node_cache: OneFlightCache<ContentHash, Node>,
     root: Mutex<Option<ContentHash>>,
-}
-
-pub struct RwMerkleStore<B: TreeWriter> {
-    inner: RoMerkleStore<B>,
-    params: TreeParameters,
     pending_writes: std::sync::Mutex<Vec<(String, ContentHash)>>,
     /// Serializes commits and `set_root`. Readers only take the root lock,
     /// which is held just long enough to read or swap the root.
@@ -118,13 +123,19 @@ impl Drop for RestorePending<'_> {
     }
 }
 
-impl<B: TreeReader> RoMerkleStore<B> {
-    pub fn new(backend: B, parallel: usize) -> Self {
+impl<B: TreeReader> MerkleStore<B> {
+    /// Creates a store with no root. `parallel` caps concurrent backend
+    /// writes per tree level during `commit`. `params` sets the tree shape
+    /// for writes; it must match the shape of any root passed to `set_root`.
+    pub fn new(backend: B, parallel: usize, params: TreeParameters) -> Self {
         Self {
             backend,
             parallel,
+            params,
             node_cache: OneFlightCache::new(),
             root: Mutex::new(None),
+            pending_writes: Default::default(),
+            commit_lock: Mutex::new(()),
         }
     }
 
@@ -140,7 +151,10 @@ impl<B: TreeReader> RoMerkleStore<B> {
         self.root.lock().await.clone()
     }
 
+    /// Replaces the root. Waits for any running commit to finish first, so
+    /// the commit can't overwrite it.
     pub async fn set_root(&self, root: ContentHash) {
+        let _commit = self.commit_lock.lock().await;
         *self.root.lock().await = Some(root);
     }
 
@@ -233,47 +247,7 @@ impl<B: TreeReader> RoMerkleStore<B> {
     }
 }
 
-impl<B: TreeWriter> RwMerkleStore<B> {
-    pub fn new(backend: B, parallel: usize, params: TreeParameters) -> Self {
-        Self {
-            inner: RoMerkleStore::new(backend, parallel),
-            params,
-            pending_writes: Default::default(),
-            commit_lock: Mutex::new(()),
-        }
-    }
-
-    pub fn backend(&self) -> &B {
-        &self.inner.backend()
-    }
-
-    pub async fn has_root(&self) -> bool {
-        self.inner.has_root().await
-    }
-
-    pub async fn root(&self) -> Option<ContentHash> {
-        self.inner.root().await
-    }
-
-    /// Replaces the root. Waits for any running commit to finish first, so
-    /// the commit can't overwrite it.
-    pub async fn set_root(&self, root: ContentHash) {
-        let _commit = self.commit_lock.lock().await;
-        self.inner.set_root(root).await
-    }
-
-    pub async fn get_file(&self, name: &str) -> MerkleResult<Option<Vec<u8>>, B::Error> {
-        self.inner.get_file(name).await
-    }
-
-    pub async fn get_file_by_hash(&self, hash: &ContentHash) -> MerkleResult<Vec<u8>, B::Error> {
-        self.inner.get_file_by_hash(hash).await
-    }
-
-    pub async fn get_file_hash(&self, name: &str) -> MerkleResult<Option<ContentHash>, B::Error> {
-        self.inner.get_file_hash(name).await
-    }
-
+impl<B: TreeWriter> MerkleStore<B> {
     pub async fn delete(&self, _name: &str) -> MerkleResult<(), B::Error> {
         // Not implemented yet
         Ok(())
@@ -300,11 +274,11 @@ impl<B: TreeWriter> RwMerkleStore<B> {
             queue: &self.pending_writes,
             items: Some(std::mem::take(&mut *self.pending_writes.lock().unwrap())),
         };
-        let root = self.inner.root().await;
+        let root = self.root().await;
         let next_root = self
             .build_tree(root, restore.items.as_deref().unwrap())
             .await?;
-        *self.inner.root.lock().await = next_root;
+        *self.root.lock().await = next_root;
         restore.items = None;
         Ok(())
     }
@@ -331,7 +305,7 @@ impl<B: TreeWriter> RwMerkleStore<B> {
         let mut map: HashMap<NameHash, Vec<(NameHash, ContentHash)>> = HashMap::new();
         let mut futures = stream::iter(premap.into_iter().map(|(key, v)| async move {
             // Find an existing leaf node to merge with.
-            let node = self.inner.lookup(root.as_ref(), key).await?;
+            let node = self.lookup(root.as_ref(), key).await?;
             let mut node = node
                 .as_ref()
                 .and_then(|node| node.as_leaf())
@@ -343,7 +317,7 @@ impl<B: TreeWriter> RwMerkleStore<B> {
             let hash = self.write_node(&Node::Leaf(node)).await?;
             MerkleResult::Ok((key, hash))
         }))
-        .buffer_unordered(self.inner.parallel);
+        .buffer_unordered(self.parallel);
         let mut next_root = root;
         while let Some((key, hash)) = futures.try_next().await? {
             if tree_depth == 0 {
@@ -360,7 +334,7 @@ impl<B: TreeWriter> RwMerkleStore<B> {
             let mut next_map: HashMap<NameHash, Vec<_>> = HashMap::new();
             let mut futures = stream::iter(map.into_iter().map(|(key, v)| async move {
                 trace!("writing into node {key:?}");
-                let node = self.inner.lookup(root.as_ref(), key).await?;
+                let node = self.lookup(root.as_ref(), key).await?;
                 let mut node = node
                     .as_ref()
                     .and_then(|n| n.as_index())
@@ -374,7 +348,7 @@ impl<B: TreeWriter> RwMerkleStore<B> {
                 let hash = self.write_node(&Node::Index(node)).await?;
                 MerkleResult::Ok((key, hash))
             }))
-            .buffer_unordered(self.inner.parallel);
+            .buffer_unordered(self.parallel);
             while let Some((key, hash)) = futures.try_next().await? {
                 next_root = Some(hash);
                 if depth > 0 {
@@ -398,7 +372,7 @@ impl<B: TreeWriter> RwMerkleStore<B> {
     ) -> MerkleResult<ContentHash, B::Error> {
         let hash = compute_hash(&data);
         trace!(hash = ?hash, "write");
-        self.inner.backend.write(&hash, data, is_data).await?;
+        self.backend.write(&hash, data, is_data).await?;
         Ok(hash)
     }
 
@@ -409,7 +383,7 @@ impl<B: TreeWriter> RwMerkleStore<B> {
     }
 }
 
-impl<B: TreeEnumerator> RoMerkleStore<B> {
+impl<B: TreeReader> MerkleStore<B> {
     async fn enumerate_live_objects(&self) -> MerkleResult<HashSet<(ContentHash, bool)>, B::Error> {
         let mut live = HashSet::new();
         if let Some(head) = &self.root().await {
@@ -469,11 +443,7 @@ impl<B: TreeEnumerator> RoMerkleStore<B> {
     }
 }
 
-impl<B: TreeEnumerator> RwMerkleStore<B> {
-    pub async fn enumerate(&self) -> MerkleResult<Vec<(String, ContentHash)>, B::Error> {
-        self.inner.enumerate().await
-    }
-
+impl<B: TreeEnumerator> MerkleStore<B> {
     /// Deletes every object not reachable from the current root or from a
     /// pending (uncommitted) write.
     ///
@@ -483,10 +453,10 @@ impl<B: TreeEnumerator> RwMerkleStore<B> {
     pub async fn gc(&mut self) -> MerkleResult<(), B::Error> {
         debug!("starting GC");
 
-        let all = self.inner.backend.enumerate_all().await?;
+        let all = self.backend.enumerate_all().await?;
         debug!(all = all.len(), "all objects enumerated");
 
-        let mut live = self.inner.enumerate_live_objects().await?;
+        let mut live = self.enumerate_live_objects().await?;
         for (_, hash) in self.pending_writes.get_mut().unwrap().iter() {
             live.insert((*hash, true));
         }
@@ -497,7 +467,7 @@ impl<B: TreeEnumerator> RwMerkleStore<B> {
 
         for (entry, is_data) in &dead {
             trace!(hash = ?entry, is_data, "deleted");
-            self.inner.backend.delete(entry, *is_data).await?
+            self.backend.delete(entry, *is_data).await?
         }
         debug!("GC delete completed");
 
