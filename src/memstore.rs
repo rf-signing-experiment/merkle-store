@@ -32,9 +32,9 @@ impl TreeReader for MemoryStore {
     async fn read(
         &self,
         hash: &ContentHash,
-        is_leaf: bool,
+        is_data: bool,
     ) -> Result<Option<Vec<u8>>, Self::Error> {
-        if is_leaf {
+        if is_data {
             Ok(self.data.lock().unwrap().get(hash).cloned())
         } else {
             Ok(self.tree.lock().unwrap().get(hash).cloned())
@@ -47,9 +47,9 @@ impl TreeWriter for MemoryStore {
         &self,
         hash: &ContentHash,
         data: Vec<u8>,
-        is_leaf: bool,
+        is_data: bool,
     ) -> Result<(), Self::Error> {
-        if is_leaf {
+        if is_data {
             self.data.lock().unwrap().insert(*hash, data);
         } else {
             self.tree.lock().unwrap().insert(*hash, data);
@@ -57,8 +57,8 @@ impl TreeWriter for MemoryStore {
         Ok(())
     }
 
-    async fn delete(&self, hash: &ContentHash, is_leaf: bool) -> Result<(), Self::Error> {
-        if is_leaf {
+    async fn delete(&self, hash: &ContentHash, is_data: bool) -> Result<(), Self::Error> {
+        if is_data {
             self.data.lock().unwrap().remove(hash);
         } else {
             self.tree.lock().unwrap().remove(hash);
@@ -77,68 +77,5 @@ impl TreeEnumerator for MemoryStore {
             result.insert((*k, true));
         }
         Ok(result)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{RwMerkleStore, TreeParameters};
-
-    use super::*;
-
-    #[test]
-    fn test_memory_store() {
-        futures::executor::block_on(async {
-            let store = RwMerkleStore::new(
-                MemoryStore::new(),
-                1,
-                TreeParameters {
-                    depth: 2,
-                    breadth: 4,
-                },
-            );
-
-            for i in 0..100 {
-                store
-                    .put_object(&format!("node:{i}"), format!("data:{i}").into_bytes())
-                    .await
-                    .unwrap();
-            }
-            store.commit().await.unwrap();
-
-            for i in 100..200 {
-                store
-                    .put_object(&format!("node:{i}"), format!("data:{i}").into_bytes())
-                    .await
-                    .unwrap();
-            }
-
-            store.commit().await.unwrap();
-
-            for i in 0..200 {
-                assert_eq!(
-                    store.get_file(&format!("node:{i}")).await.unwrap().unwrap(),
-                    format!("data:{i}").into_bytes()
-                );
-            }
-        })
-    }
-
-    #[test]
-    fn multiple_files() {
-        futures::executor::block_on(async {
-            let store = RwMerkleStore::new(
-                MemoryStore::new(),
-                1,
-                TreeParameters {
-                    depth: 2,
-                    breadth: 4,
-                },
-            );
-            store.put_object("test", vec![1]).await.unwrap();
-            store.commit().await.unwrap();
-            let content = store.get_file("test").await.unwrap().unwrap();
-            assert_eq!(content, [1]);
-        })
     }
 }

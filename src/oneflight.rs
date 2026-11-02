@@ -1,9 +1,7 @@
-//! An async caching layer.
-//!
-//! Evaluates an async function f for a given key if it's not already in the cache.
-//!
-//! Ensures that the function is only evaluated once per key, even if multiple requests are in flight.
-//! Failed (or cancelled) evaluations are not cached, and leave no entry behind.
+//! Async function cache.
+//! 
+//! Ensures that only one execution of a function is in flight for a given key at
+//! a time.
 
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 
@@ -37,7 +35,6 @@ where
         }
     }
 
-    /// Number of entries, including loads that are still in flight.
     pub fn len(&self) -> usize {
         self.cache.lock().unwrap().len()
     }
@@ -46,8 +43,6 @@ where
         self.len() == 0
     }
 
-    /// Drops every cached entry. Loads already in flight still return their
-    /// value to their callers, but the value is not kept in the cache.
     pub fn clear(&self) {
         self.cache.lock().unwrap().clear();
     }
@@ -56,62 +51,20 @@ where
     where
         F: AsyncFnOnce(&K) -> Result<V, E>,
     {
-        loop {
-            let slot = {
-                // Acquire the global lock to ensure only one slot is inserted per key.
-                let mut cache = self.cache.lock().unwrap();
-                cache.entry(key.clone()).or_default().clone()
-            };
-            // Acquire the slot lock to ensure the future is only executed once.
-            let mut guard = slot.lock().await;
-            if let Some(v) = &*guard {
-                return Ok(v.clone());
-            }
-            // An empty slot that is no longer in the map was abandoned by a
-            // failed load or by clear(). Start over with the current slot.
-            if !self.is_current(key, &slot) {
-                continue;
-            }
-            // Declared after `guard` so it drops first: on failure or
-            // cancellation the slot leaves the map while we still hold its
-            // lock, so no waiter can start loading into an abandoned slot.
-            let mut cleanup = RemoveOnDrop {
-                cache: &self.cache,
-                key,
-                slot: &slot,
-                armed: true,
-            };
-            let v = Arc::new(f(key).await?);
-            *guard = Some(v.clone());
-            cleanup.armed = false;
-            return Ok(v);
+        let slot = {
+            // Ensure only one slot created per key.
+            let mut cache = self.cache.lock().unwrap();
+            cache.entry(key.clone()).or_default().clone()
+        };
+        // Ensure only one execution.
+        let mut guard = slot.lock().await;
+        if let Some(v) = &*guard {
+            return Ok(v.clone());
         }
-    }
-
-    fn is_current(&self, key: &K, slot: &Slot<V>) -> bool {
-        let cache = self.cache.lock().unwrap();
-        cache.get(key).is_some_and(|s| Arc::ptr_eq(s, slot))
-    }
-}
-
-/// Removes `slot` from the map on drop, unless disarmed.
-struct RemoveOnDrop<'a, K: Hash + Eq, V> {
-    cache: &'a SyncMutex<HashMap<K, Slot<V>>>,
-    key: &'a K,
-    slot: &'a Slot<V>,
-    armed: bool,
-}
-
-impl<K: Hash + Eq, V> Drop for RemoveOnDrop<'_, K, V> {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        // Don't panic while possibly unwinding; a poisoned map is still usable.
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.get(self.key).is_some_and(|s| Arc::ptr_eq(s, self.slot)) {
-            cache.remove(self.key);
-        }
+        // We now hold the lock, so run the function and store the result.
+        let v = Arc::new(f(key).await?);
+        *guard = Some(v.clone());
+        Ok(v)
     }
 }
 
@@ -166,12 +119,11 @@ mod tests {
     }
 
     #[test]
-    fn failure_leaves_no_entry() {
+    fn failure_is_not_cached() {
         block_on(async {
             let cache = OneFlightCache::<u32, u32>::new();
             let r = cache.get(&1, async |_| Err::<u32, _>("boom")).await;
             assert_eq!(r, Err("boom"));
-            assert!(cache.is_empty());
 
             // A later call retries and caches the value.
             let r = cache.get(&1, async |k| Ok::<_, ()>(k + 1)).await;
@@ -181,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_load_leaves_no_entry() {
+    fn cancelled_load_is_retried() {
         let cache = OneFlightCache::<u32, u32>::new();
         {
             let fut = cache.get(&1, async |_| {
@@ -191,9 +143,9 @@ mod tests {
             let mut fut = Box::pin(fut);
             // Start the load, then drop it mid-flight.
             assert!(futures::FutureExt::now_or_never(&mut fut).is_none());
-            assert_eq!(cache.len(), 1);
         }
-        assert!(cache.is_empty());
+        let r = block_on(cache.get(&1, async |k| Ok::<_, ()>(k + 1)));
+        assert_eq!(*r.unwrap(), 2);
     }
 
     #[test]

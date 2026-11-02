@@ -1,5 +1,6 @@
 pub mod fscache;
 pub mod fsstore;
+mod fsutil;
 pub mod memstore;
 pub mod oneflight;
 mod types;
@@ -95,6 +96,26 @@ pub struct RwMerkleStore<B: TreeWriter> {
     inner: RoMerkleStore<B>,
     params: TreeParameters,
     pending_writes: std::sync::Mutex<Vec<(String, ContentHash)>>,
+    /// Serializes commits and `set_root`. Readers only take the root lock,
+    /// which is held just long enough to read or swap the root.
+    commit_lock: Mutex<()>,
+}
+
+/// Puts taken pending writes back into the queue (ahead of any newer ones)
+/// unless disarmed, so a failed or cancelled commit doesn't lose them.
+struct RestorePending<'a> {
+    queue: &'a std::sync::Mutex<Vec<(String, ContentHash)>>,
+    items: Option<Vec<(String, ContentHash)>>,
+}
+
+impl Drop for RestorePending<'_> {
+    fn drop(&mut self) {
+        if let Some(mut items) = self.items.take() {
+            let mut queue = self.queue.lock().unwrap();
+            items.append(&mut queue);
+            *queue = items;
+        }
+    }
 }
 
 impl<B: TreeReader> RoMerkleStore<B> {
@@ -168,28 +189,34 @@ impl<B: TreeReader> RoMerkleStore<B> {
         Ok(data)
     }
 
+    /// Walks from `root` along `key` and returns the node where the key runs
+    /// out (or the first leaf). Returns `None` if the path hits an empty slot.
     async fn lookup(
         &self,
-        mut root: Option<&ContentHash>,
+        root: Option<&ContentHash>,
         mut key: NameHash,
     ) -> MerkleResult<Option<Arc<Node>>, B::Error> {
         debug!(?key, "lookup");
-        let mut node = None;
-        while let Some(h) = root {
-            node = Some(self.load_node(&h).await?);
-            match node.as_deref().unwrap() {
+        let Some(mut hash) = root.copied() else {
+            return Ok(None);
+        };
+        loop {
+            let node = self.load_node(&hash).await?;
+            match &*node {
                 Node::Index(index_node) => {
                     if key.is_empty() {
-                        return Ok(node);
+                        return Ok(Some(node));
                     }
                     let (remaining, index) = key.split(index_node.len_bits());
                     key = remaining;
-                    root = index_node.get(index);
+                    match index_node.get(index) {
+                        Some(child) => hash = *child,
+                        None => return Ok(None),
+                    }
                 }
-                Node::Leaf(..) => return Ok(node),
+                Node::Leaf(..) => return Ok(Some(node)),
             }
         }
-        Ok(node)
     }
 
     async fn load_node_uncached(&self, hash: &ContentHash) -> MerkleResult<Node, B::Error> {
@@ -212,6 +239,7 @@ impl<B: TreeWriter> RwMerkleStore<B> {
             inner: RoMerkleStore::new(backend, parallel),
             params,
             pending_writes: Default::default(),
+            commit_lock: Mutex::new(()),
         }
     }
 
@@ -227,7 +255,10 @@ impl<B: TreeWriter> RwMerkleStore<B> {
         self.inner.root().await
     }
 
+    /// Replaces the root. Waits for any running commit to finish first, so
+    /// the commit can't overwrite it.
     pub async fn set_root(&self, root: ContentHash) {
+        let _commit = self.commit_lock.lock().await;
         self.inner.set_root(root).await
     }
 
@@ -259,21 +290,41 @@ impl<B: TreeWriter> RwMerkleStore<B> {
     }
 
     /// Commits all pending writes.
+    ///
+    /// If the commit fails or is cancelled, the pending writes stay queued
+    /// for the next commit. Readers keep seeing the old root until the end.
     pub async fn commit(&self) -> MerkleResult<(), B::Error> {
         debug!("commit:starting");
-        // Hold the lock to prevent dropped writes.
-        let mut root_lock = self.inner.root.lock().await;
-        let root = root_lock.clone();
+        let _commit = self.commit_lock.lock().await;
+        let mut restore = RestorePending {
+            queue: &self.pending_writes,
+            items: Some(std::mem::take(&mut *self.pending_writes.lock().unwrap())),
+        };
+        let root = self.inner.root().await;
+        let next_root = self
+            .build_tree(root, restore.items.as_deref().unwrap())
+            .await?;
+        *self.inner.root.lock().await = next_root;
+        restore.items = None;
+        Ok(())
+    }
+
+    /// Applies `pending` on top of `root` and returns the new root hash.
+    async fn build_tree(
+        &self,
+        root: Option<ContentHash>,
+        pending: &[(String, ContentHash)],
+    ) -> MerkleResult<Option<ContentHash>, B::Error> {
         let tree_depth = self.params.depth;
         let tree_breadth = self.params.breadth;
 
-        // Group all the pending writes into buckets by hash.
-        let pending = std::mem::take(&mut *self.pending_writes.lock().unwrap());
+        // Group all the pending writes into buckets by hash. Order within a
+        // bucket is kept, so the last put of a name wins.
         debug!(pending = pending.len(), "commit:grouping");
         let mut premap: HashMap<NameHash, Vec<(String, ContentHash)>> = HashMap::new();
         for (name, hash) in pending {
-            let key = NameHash::new(&name, tree_depth * tree_breadth);
-            premap.entry(key).or_default().push((name, hash))
+            let key = NameHash::new(name, tree_depth * tree_breadth);
+            premap.entry(key).or_default().push((name.clone(), *hash))
         }
 
         debug!(pending = premap.len(), "commit:writing leaves");
@@ -293,16 +344,17 @@ impl<B: TreeWriter> RwMerkleStore<B> {
             MerkleResult::Ok((key, hash))
         }))
         .buffer_unordered(self.inner.parallel);
+        let mut next_root = root;
         while let Some((key, hash)) = futures.try_next().await? {
             if tree_depth == 0 {
-                *root_lock = Some(hash);
-                return Ok(());
+                // The root is a single leaf, so there is only one bucket.
+                next_root = Some(hash);
+                continue;
             }
             let (left, right) = key.split(tree_breadth * (tree_depth - 1));
             map.entry(right).or_default().push((left, hash));
         }
 
-        let mut next_root = root;
         for depth in (0..tree_depth).rev() {
             debug!(pending = map.len(), depth, "commit:writing tree");
             let mut next_map: HashMap<NameHash, Vec<_>> = HashMap::new();
@@ -334,8 +386,7 @@ impl<B: TreeWriter> RwMerkleStore<B> {
             map = next_map;
         }
 
-        *root_lock = next_root;
-        Ok(())
+        Ok(next_root)
     }
 
     /// Hashes the data and writes into the store.
@@ -423,13 +474,22 @@ impl<B: TreeEnumerator> RwMerkleStore<B> {
         self.inner.enumerate().await
     }
 
-    pub async fn gc(&self) -> MerkleResult<(), B::Error> {
+    /// Deletes every object not reachable from the current root or from a
+    /// pending (uncommitted) write.
+    ///
+    /// Takes `&mut self` so no `put_object` or `commit` on this store can run
+    /// at the same time. It does not protect against other processes writing
+    /// to the same backend.
+    pub async fn gc(&mut self) -> MerkleResult<(), B::Error> {
         debug!("starting GC");
 
         let all = self.inner.backend.enumerate_all().await?;
         debug!(all = all.len(), "all objects enumerated");
 
-        let live = self.inner.enumerate_live_objects().await?;
+        let mut live = self.inner.enumerate_live_objects().await?;
+        for (_, hash) in self.pending_writes.get_mut().unwrap().iter() {
+            live.insert((*hash, true));
+        }
         debug!(live = live.len(), "live objects enumerated");
 
         let dead: Vec<_> = all.difference(&live).cloned().collect();
@@ -445,10 +505,12 @@ impl<B: TreeEnumerator> RwMerkleStore<B> {
     }
 }
 
-fn compute_hash(data: &[u8]) -> ContentHash {
-    let len: u8 = (data.len().ilog2() + 1).try_into().unwrap();
+/// Computes the `ContentHash` of `data`, as used for every stored object.
+pub fn compute_hash(data: &[u8]) -> ContentHash {
+    // Size class: 0 for empty data, otherwise ilog2(len) + 1 (at most 64).
+    let size_class = data.len().checked_ilog2().map_or(0, |l| l + 1) as u8;
     let mut out = [0u8; 33];
-    out[0] = len;
+    out[0] = size_class;
     let output: [u8; 32] = Sha256::digest(data).into();
     out[1..].copy_from_slice(&output);
     out.into()

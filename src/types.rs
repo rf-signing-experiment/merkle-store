@@ -97,9 +97,12 @@ impl LeafNode {
             .map(|v| &self.0[v].1)
     }
 
+    /// Inserts `key`, replacing its value if it is already present.
     pub fn insert(&mut self, key: String, value: ContentHash) {
-        let index = self.0.partition_point(|i| i.0 < key);
-        self.0.insert(index, (key, value));
+        match self.0.binary_search_by(|(k, _)| k.cmp(&key)) {
+            Ok(index) => self.0[index].1 = value,
+            Err(index) => self.0.insert(index, (key, value)),
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &ContentHash)> {
