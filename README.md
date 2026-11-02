@@ -37,10 +37,7 @@ To reopen a tree, construct a store over the same backend and call
   empty by deletes are dropped, so the tree only depends on the names in it.
   A deleted file's data stays in the backend until GC.
 - **GC** (`MerkleStore::gc`) deletes every object not reachable from the
-  current root or from an uncommitted `put_object`, including objects that
-  only older roots reference. It takes `&mut self`, so it can't overlap with
-  writes on the same store. Nothing stops another process from writing to the
-  same backend during GC.
+  current root.
 
 ## Backends
 
@@ -54,17 +51,18 @@ Implement `TreeReader` for read-only access, `TreeWriter` for writes, and
 `TreeEnumerator` to enable GC. `MerkleStore<B>` offers whichever methods
 the backend supports.
 
-## Status
-
-Early and experimental. Known gaps:
-
-- The tree parameters aren't stored in the tree, so a tree must always be
-  written with the same `TreeParameters` it was created with.
-- The filesystem backends use blocking `std::fs` calls inside async fns.
-
 ## Development
 
 ```sh
 cargo build
 cargo test
 ```
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.

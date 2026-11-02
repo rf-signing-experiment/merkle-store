@@ -2,6 +2,8 @@
 name = "merkle-store"
 version = "0.1.0"
 edition = "2024"
+description = "A content-addressed Merkle tree that maps file names to blobs, over pluggable storage backends."
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 borsh = { version = "1.6.1", features = ["derive"] }
