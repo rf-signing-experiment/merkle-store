@@ -65,6 +65,16 @@ impl IndexNode {
         self.0[key.0 as usize] = value;
     }
 
+    /// Empties the slot for `key`.
+    pub fn remove(&mut self, key: NameHash) {
+        self.0[key.0 as usize] = ContentHash([0; ContentHash::SIZE]);
+    }
+
+    /// True if every slot is empty.
+    pub fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &ContentHash> {
         self.0.iter().filter(|node| !node.is_null())
     }
@@ -103,6 +113,17 @@ impl LeafNode {
             Ok(index) => self.0[index].1 = value,
             Err(index) => self.0.insert(index, (key, value)),
         }
+    }
+
+    /// Removes `key` if present.
+    pub fn remove(&mut self, key: &str) {
+        if let Ok(index) = self.0.binary_search_by(|(k, _)| k.as_str().cmp(key)) {
+            self.0.remove(index);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &ContentHash)> {

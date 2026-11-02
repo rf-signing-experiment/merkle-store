@@ -100,17 +100,20 @@ pub struct MerkleStore<B> {
     params: TreeParameters,
     node_cache: OneFlightCache<ContentHash, Node>,
     root: Mutex<Option<ContentHash>>,
-    pending_writes: std::sync::Mutex<Vec<(String, ContentHash)>>,
+    pending_writes: std::sync::Mutex<Vec<PendingWrite>>,
     /// Serializes commits and `set_root`. Readers only take the root lock,
     /// which is held just long enough to read or swap the root.
     commit_lock: Mutex<()>,
 }
 
+/// A queued change to a name: `Some(hash)` to put, `None` to delete.
+type PendingWrite = (String, Option<ContentHash>);
+
 /// Puts taken pending writes back into the queue (ahead of any newer ones)
 /// unless disarmed, so a failed or cancelled commit doesn't lose them.
 struct RestorePending<'a> {
-    queue: &'a std::sync::Mutex<Vec<(String, ContentHash)>>,
-    items: Option<Vec<(String, ContentHash)>>,
+    queue: &'a std::sync::Mutex<Vec<PendingWrite>>,
+    items: Option<Vec<PendingWrite>>,
 }
 
 impl Drop for RestorePending<'_> {
@@ -248,22 +251,30 @@ impl<B: TreeReader> MerkleStore<B> {
 }
 
 impl<B: TreeWriter> MerkleStore<B> {
-    pub async fn delete(&self, _name: &str) -> MerkleResult<(), B::Error> {
-        // Not implemented yet
+    /// Removes `name` from the tree at the next `commit`. Deleting a name
+    /// that doesn't exist is not an error. The file's data stays in the
+    /// backend until `gc` runs.
+    pub async fn delete(&self, name: &str) -> MerkleResult<(), B::Error> {
+        self.pending_writes
+            .lock()
+            .unwrap()
+            .push((name.to_string(), None));
         Ok(())
     }
 
-    // Saves an object into the store, replacing if the name was already used.
+    /// Saves an object into the store, replacing it if the name was already
+    /// used. The data is written right away; the name appears in the tree at
+    /// the next `commit`.
     pub async fn put_object(&self, name: &str, data: Vec<u8>) -> MerkleResult<(), B::Error> {
         let hash = self.write_object(data, true).await?;
         self.pending_writes
             .lock()
             .unwrap()
-            .push((name.to_string(), hash));
+            .push((name.to_string(), Some(hash)));
         Ok(())
     }
 
-    /// Commits all pending writes.
+    /// Commits all pending puts and deletes.
     ///
     /// If the commit fails or is cancelled, the pending writes stay queued
     /// for the next commit. Readers keep seeing the old root until the end.
@@ -284,25 +295,30 @@ impl<B: TreeWriter> MerkleStore<B> {
     }
 
     /// Applies `pending` on top of `root` and returns the new root hash.
+    ///
+    /// Nodes left empty by deletes are dropped (their parent slot is
+    /// cleared), so the result is the same tree as if the deleted names had
+    /// never been added. If nothing is left, the new root is `None`.
     async fn build_tree(
         &self,
         root: Option<ContentHash>,
-        pending: &[(String, ContentHash)],
+        pending: &[PendingWrite],
     ) -> MerkleResult<Option<ContentHash>, B::Error> {
         let tree_depth = self.params.depth;
         let tree_breadth = self.params.breadth;
 
         // Group all the pending writes into buckets by hash. Order within a
-        // bucket is kept, so the last put of a name wins.
+        // bucket is kept, so the last put or delete of a name wins.
         debug!(pending = pending.len(), "commit:grouping");
-        let mut premap: HashMap<NameHash, Vec<(String, ContentHash)>> = HashMap::new();
+        let mut premap: HashMap<NameHash, Vec<PendingWrite>> = HashMap::new();
         for (name, hash) in pending {
             let key = NameHash::new(name, tree_depth * tree_breadth);
             premap.entry(key).or_default().push((name.clone(), *hash))
         }
 
         debug!(pending = premap.len(), "commit:writing leaves");
-        let mut map: HashMap<NameHash, Vec<(NameHash, ContentHash)>> = HashMap::new();
+        // Child hashes to set in each parent index node; `None` clears a slot.
+        let mut map: HashMap<NameHash, Vec<(NameHash, Option<ContentHash>)>> = HashMap::new();
         let mut futures = stream::iter(premap.into_iter().map(|(key, v)| async move {
             // Find an existing leaf node to merge with.
             let node = self.lookup(root.as_ref(), key).await?;
@@ -311,10 +327,17 @@ impl<B: TreeWriter> MerkleStore<B> {
                 .and_then(|node| node.as_leaf())
                 .cloned()
                 .unwrap_or_else(|| LeafNode::new());
-            for (key, value) in v {
-                node.insert(key, value);
+            for (name, value) in v {
+                match value {
+                    Some(hash) => node.insert(name, hash),
+                    None => node.remove(&name),
+                }
             }
-            let hash = self.write_node(&Node::Leaf(node)).await?;
+            let hash = if node.is_empty() {
+                None
+            } else {
+                Some(self.write_node(&Node::Leaf(node)).await?)
+            };
             MerkleResult::Ok((key, hash))
         }))
         .buffer_unordered(self.parallel);
@@ -322,7 +345,7 @@ impl<B: TreeWriter> MerkleStore<B> {
         while let Some((key, hash)) = futures.try_next().await? {
             if tree_depth == 0 {
                 // The root is a single leaf, so there is only one bucket.
-                next_root = Some(hash);
+                next_root = hash;
                 continue;
             }
             let (left, right) = key.split(tree_breadth * (tree_depth - 1));
@@ -342,18 +365,27 @@ impl<B: TreeWriter> MerkleStore<B> {
                     .unwrap_or_else(|| IndexNode::new(tree_breadth));
 
                 for (index, value) in v {
-                    node.insert(index, value);
+                    match value {
+                        Some(hash) => node.insert(index, hash),
+                        None => node.remove(index),
+                    }
                 }
 
-                let hash = self.write_node(&Node::Index(node)).await?;
+                let hash = if node.is_empty() {
+                    None
+                } else {
+                    Some(self.write_node(&Node::Index(node)).await?)
+                };
                 MerkleResult::Ok((key, hash))
             }))
             .buffer_unordered(self.parallel);
             while let Some((key, hash)) = futures.try_next().await? {
-                next_root = Some(hash);
                 if depth > 0 {
                     let (left, right) = key.split(tree_breadth * (depth - 1));
                     next_map.entry(right).or_default().push((left, hash));
+                } else {
+                    // Depth 0 has a single node: the root.
+                    next_root = hash;
                 }
             }
 
@@ -458,7 +490,9 @@ impl<B: TreeEnumerator> MerkleStore<B> {
 
         let mut live = self.enumerate_live_objects().await?;
         for (_, hash) in self.pending_writes.get_mut().unwrap().iter() {
-            live.insert((*hash, true));
+            if let Some(hash) = hash {
+                live.insert((*hash, true));
+            }
         }
         debug!(live = live.len(), "live objects enumerated");
 

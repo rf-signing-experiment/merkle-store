@@ -32,8 +32,10 @@ To reopen a tree, construct a store over the same backend and call
   bits (lowest bits first) to pick one of `2^breadth` children. Below the last
   index level, a leaf node holds a sorted list of `(name, hash)` pairs.
 - **Writes** are two-phase: `put_object` uploads the blob right away and queues
-  the name; `commit` rewrites only the affected leaves and index nodes
-  (copy-on-write) and then swaps the root.
+  the name, and `delete` queues a removal; `commit` rewrites only the affected
+  leaves and index nodes (copy-on-write) and then swaps the root. Nodes left
+  empty by deletes are dropped, so the tree only depends on the names in it.
+  A deleted file's data stays in the backend until GC.
 - **GC** (`MerkleStore::gc`) deletes every object not reachable from the
   current root or from an uncommitted `put_object`, including objects that
   only older roots reference. It takes `&mut self`, so it can't overlap with
@@ -56,7 +58,6 @@ the backend supports.
 
 Early and experimental. Known gaps:
 
-- `delete(name)` is a no-op.
 - The tree parameters aren't stored in the tree, so a tree must always be
   written with the same `TreeParameters` it was created with.
 - The filesystem backends use blocking `std::fs` calls inside async fns.

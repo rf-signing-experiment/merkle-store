@@ -297,3 +297,131 @@ fn multiple_files() {
         assert_eq!(content, [1]);
     })
 }
+
+async fn put_all(store: &MerkleStore<MemoryStore>, names: impl IntoIterator<Item = u8>) {
+    for i in names {
+        store.put_object(&format!("f{i}"), vec![i]).await.unwrap();
+    }
+}
+
+#[test]
+fn delete_removes_name() {
+    block_on(async {
+        let store = store(2, 4);
+        store.put_object("a", b"a".to_vec()).await.unwrap();
+        store.put_object("b", b"b".to_vec()).await.unwrap();
+        store.commit().await.unwrap();
+
+        store.delete("a").await.unwrap();
+        // Not visible until commit.
+        assert_eq!(get(&store, "a").await, Some(b"a".to_vec()));
+        store.commit().await.unwrap();
+
+        assert_eq!(get(&store, "a").await, None);
+        assert_eq!(get(&store, "b").await, Some(b"b".to_vec()));
+        let names: Vec<_> = store
+            .enumerate()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, ["b"]);
+    });
+}
+
+#[test]
+fn last_put_or_delete_wins_within_a_commit() {
+    block_on(async {
+        let store = store(2, 4);
+        store.put_object("a", b"a".to_vec()).await.unwrap();
+        store.delete("a").await.unwrap();
+        store.put_object("b", b"b".to_vec()).await.unwrap();
+        store.commit().await.unwrap();
+        assert_eq!(get(&store, "a").await, None);
+
+        store.delete("b").await.unwrap();
+        store.put_object("b", b"b2".to_vec()).await.unwrap();
+        store.commit().await.unwrap();
+        assert_eq!(get(&store, "b").await, Some(b"b2".to_vec()));
+    });
+}
+
+#[test]
+fn delete_missing_name_changes_nothing() {
+    block_on(async {
+        let store = store(2, 4);
+        store.delete("nothing").await.unwrap();
+        store.commit().await.unwrap();
+        assert_eq!(store.root().await, None);
+
+        store.put_object("a", b"a".to_vec()).await.unwrap();
+        store.commit().await.unwrap();
+        let root = store.root().await;
+        store.delete("nothing").await.unwrap();
+        store.commit().await.unwrap();
+        assert_eq!(store.root().await, root);
+    });
+}
+
+#[test]
+fn deleting_everything_clears_root() {
+    for depth in [0, 2] {
+        block_on(async {
+            let mut store = store(depth, 4);
+            put_all(&store, 0..20).await;
+            store.commit().await.unwrap();
+            for i in 0..20 {
+                store.delete(&format!("f{i}")).await.unwrap();
+            }
+            store.commit().await.unwrap();
+
+            assert_eq!(store.root().await, None);
+            assert!(store.enumerate().await.unwrap().is_empty());
+            store.gc().await.unwrap();
+            assert!(store.backend().enumerate_all().await.unwrap().is_empty());
+
+            // The store is still usable afterwards.
+            put_all(&store, [1]).await;
+            store.commit().await.unwrap();
+            assert_eq!(get(&store, "f1").await, Some(vec![1]));
+        });
+    }
+}
+
+#[test]
+fn delete_gives_same_tree_as_never_adding() {
+    // A wide tree with few files, so deletes empty out whole index nodes.
+    block_on(async {
+        let a = store(2, 8);
+        put_all(&a, 0..10).await;
+        a.commit().await.unwrap();
+        for i in 0..5 {
+            a.delete(&format!("f{i}")).await.unwrap();
+        }
+        a.commit().await.unwrap();
+
+        let b = store(2, 8);
+        put_all(&b, 5..10).await;
+        b.commit().await.unwrap();
+
+        assert_eq!(a.root().await, b.root().await);
+    });
+}
+
+#[test]
+fn gc_removes_deleted_data() {
+    block_on(async {
+        let mut store = store(2, 4);
+        store.put_object("a", b"a".to_vec()).await.unwrap();
+        store.put_object("b", b"b".to_vec()).await.unwrap();
+        store.commit().await.unwrap();
+        store.delete("a").await.unwrap();
+        store.commit().await.unwrap();
+        store.gc().await.unwrap();
+
+        let all = store.backend().enumerate_all().await.unwrap();
+        assert!(!all.contains(&(compute_hash(b"a"), true)));
+        assert!(all.contains(&(compute_hash(b"b"), true)));
+    });
+}
