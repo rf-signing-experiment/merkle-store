@@ -48,10 +48,7 @@ pub struct IndexNode(Vec<ContentHash>);
 impl IndexNode {
     pub fn new(nibble_width: u8) -> Self {
         assert!(nibble_width > 0);
-        Self(vec![
-            ContentHash([0; ContentHash::SIZE]);
-            ContentHash::count(nibble_width)
-        ])
+        Self(vec![ContentHash::NULL; ContentHash::count(nibble_width)])
     }
 
     pub fn len_bits(&self) -> u8 {
@@ -61,12 +58,8 @@ impl IndexNode {
     }
 
     pub fn get(&self, key: NameHash) -> Option<&ContentHash> {
-        let v = self.0.get(key.0 as usize).unwrap();
-        if v.0 == [0; ContentHash::SIZE] {
-            None
-        } else {
-            Some(v)
-        }
+        let v = &self.0[key.0 as usize];
+        if v.is_null() { None } else { Some(v) }
     }
 
     pub fn insert(&mut self, key: NameHash, value: ContentHash) {
@@ -75,7 +68,7 @@ impl IndexNode {
 
     /// Empties the slot for `key`.
     pub fn remove(&mut self, key: NameHash) {
-        self.0[key.0 as usize] = ContentHash([0; ContentHash::SIZE]);
+        self.0[key.0 as usize] = ContentHash::NULL;
     }
 
     /// True if every slot is empty.
@@ -145,64 +138,37 @@ impl Debug for LeafNode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
-pub struct ContentHash([u8; ContentHash::SIZE]);
-
-impl std::hash::Hash for ContentHash {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write(&self.0[ContentHash::SIZE - size_of::<u64>()..]);
-    }
-}
-
-impl Debug for ContentHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl Display for ContentHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut output = [0u8; ContentHash::SIZE * 2];
-        hex::encode_to_slice(self.0, &mut output).unwrap();
-        f.write_str(std::str::from_utf8(&output).unwrap())
-    }
-}
-
-impl From<[u8; ContentHash::SIZE]> for ContentHash {
-    fn from(value: [u8; ContentHash::SIZE]) -> Self {
-        ContentHash(value)
-    }
-}
-
-impl std::str::FromStr for ContentHash {
-    type Err = FromHexError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let mut data = [0u8; ContentHash::SIZE];
-        hex::decode_to_slice(value.as_bytes(), &mut data)?;
-        Ok(ContentHash(data))
-    }
+/// Identifies a stored object: the SHA-256 of its content, plus a size
+/// class that bounds its length. The all-zero hash (`NULL`) marks an empty
+/// slot in an index node.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, BorshDeserialize, BorshSerialize)]
+pub struct ContentHash {
+    /// 0 for empty content, otherwise `ilog2(len) + 1`, so `len < 2^size_class`.
+    size_class: u8,
+    sha256: [u8; 32],
 }
 
 impl ContentHash {
-    const SIZE: usize = 33;
+    pub(crate) const NULL: Self = Self {
+        size_class: 0,
+        sha256: [0; 32],
+    };
 
     /// Builds the hash of content with length `len` and SHA-256 `sha256`.
-    /// The leading size class byte depends only on the length: 0 for empty
-    /// content, otherwise `ilog2(len) + 1` (at most 64).
     pub(crate) fn from_sha256(len: usize, sha256: [u8; 32]) -> Self {
-        let mut out = [0u8; Self::SIZE];
-        out[0] = len.checked_ilog2().map_or(0, |l| l + 1) as u8;
-        out[1..].copy_from_slice(&sha256);
-        Self(out)
+        Self {
+            size_class: len.checked_ilog2().map_or(0, |l| l as u8 + 1),
+            sha256,
+        }
     }
 
     pub fn size_limit(&self) -> usize {
-        1 << self.0[0].min(usize::BITS as u8)
+        1 << self.size_class.min(usize::BITS as u8)
     }
 
+    /// The SHA-256 of the content.
     pub fn hash(&self) -> &[u8; 32] {
-        self.0[1..].try_into().unwrap()
+        &self.sha256
     }
 
     pub fn count(nibble_width: u8) -> usize {
@@ -210,7 +176,41 @@ impl ContentHash {
     }
 
     pub fn is_null(&self) -> bool {
-        self.0 == [0u8; Self::SIZE]
+        *self == Self::NULL
+    }
+}
+
+/// Hex of the 33 serialized bytes.
+impl Display for ContentHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02x}{}", self.size_class, hex::encode(self.sha256))
+    }
+}
+
+impl Debug for ContentHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+/// From the 33 serialized bytes.
+impl From<[u8; 33]> for ContentHash {
+    fn from(bytes: [u8; 33]) -> Self {
+        Self {
+            size_class: bytes[0],
+            sha256: bytes[1..].try_into().unwrap(),
+        }
+    }
+}
+
+/// Parses the hex form produced by `Display`.
+impl std::str::FromStr for ContentHash {
+    type Err = FromHexError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let mut bytes = [0u8; 33];
+        hex::decode_to_slice(value, &mut bytes)?;
+        Ok(bytes.into())
     }
 }
 
@@ -251,6 +251,20 @@ impl Debug for NameHash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_hash_serializes_as_33_bytes() {
+        let hash = ContentHash::from_sha256(1000, [7; 32]);
+        let bytes = borsh::to_vec(&hash).unwrap();
+        // ilog2(1000) + 1 = 10, then the SHA-256 with no length prefix.
+        assert_eq!(bytes, [&[10u8][..], &[7; 32]].concat());
+        assert_eq!(borsh::from_slice::<ContentHash>(&bytes).unwrap(), hash);
+        assert_eq!(hash.to_string().parse::<ContentHash>().unwrap(), hash);
+        assert_eq!(
+            ContentHash::from(<[u8; 33]>::try_from(bytes).unwrap()),
+            hash
+        );
+    }
 
     #[test]
     fn basic() {

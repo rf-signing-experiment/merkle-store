@@ -425,3 +425,19 @@ fn gc_removes_deleted_data() {
         assert!(all.contains(&(compute_hash(b"b"), true)));
     });
 }
+
+#[test]
+fn node_format_is_stable() {
+    // The root hash covers the serialized bytes of every node, so this fails
+    // if the on-disk node format changes.
+    block_on(async {
+        let store = store(2, 4);
+        put_all(&store, 0..20).await;
+        store.put_object("empty", vec![]).await.unwrap();
+        store.commit().await.unwrap();
+        assert_eq!(
+            store.root().unwrap().to_string(),
+            "0acfb4bf936a587cdd01dbff7d6af398ddafb285ae27d7e3d1d9805e0ee020649f"
+        );
+    });
+}
