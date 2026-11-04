@@ -465,6 +465,6 @@ impl<B: TreeEnumerator> MerkleStore<B> {
 }
 
 /// Computes the `ContentHash` of `data`, as used for every stored object.
-pub fn compute_hash(data: &[u8]) -> ContentHash {
+fn compute_hash(data: &[u8]) -> ContentHash {
     ContentHash::from(<[u8; 32]>::from(Sha256::digest(data)))
 }
