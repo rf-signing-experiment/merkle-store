@@ -2,9 +2,9 @@ mod common;
 
 use std::{collections::HashSet, fs, path::PathBuf};
 
-use common::object_path;
+use common::{compute_hash, object_path};
 use futures::executor::block_on;
-use merkle_store::{TreeEnumerator, TreeReader, TreeWriter, compute_hash, fsstore::FsStore};
+use merkle_store::{TreeEnumerator, TreeReader, TreeWriter, fsstore::FsStore};
 
 fn temp_dir() -> PathBuf {
     common::temp_dir("fsstore_test")

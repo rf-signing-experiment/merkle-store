@@ -1,8 +1,11 @@
+mod common;
+
 use std::collections::HashSet;
 
+use common::compute_hash;
 use futures::{FutureExt, executor::block_on, lock::Mutex};
 use merkle_store::{
-    ContentHash, MerkleStore, TreeEnumerator, TreeParameters, TreeReader, TreeWriter, compute_hash,
+    ContentHash, MerkleStore, TreeEnumerator, TreeParameters, TreeReader, TreeWriter,
     memstore::MemoryStore,
 };
 

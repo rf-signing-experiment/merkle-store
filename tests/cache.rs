@@ -2,12 +2,11 @@ mod common;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use common::{object_path, temp_dir};
+use common::{compute_hash, object_path, temp_dir};
 use futures::executor::block_on;
 use merkle_store::{
     ContentHash, MerkleStore, TreeParameters, TreeReader, TreeWriter,
     cache::{Cache, FsCache},
-    compute_hash,
     fsstore::FsStore,
     memstore::MemoryStore,
 };
