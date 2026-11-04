@@ -2,9 +2,9 @@ mod common;
 
 use std::{collections::HashSet, fs, path::PathBuf};
 
-use common::{compute_hash, object_path};
+use common::object_path;
 use futures::executor::block_on;
-use merkle_store::{TreeEnumerator, TreeReader, TreeWriter, fsstore::FsStore};
+use merkle_store::{ContentHash, TreeEnumerator, TreeReader, TreeWriter, fsstore::FsStore};
 
 fn temp_dir() -> PathBuf {
     common::temp_dir("fsstore_test")
@@ -23,7 +23,7 @@ fn test_enumerate_skips_temp_files() {
     let temp = temp_dir();
     let store = FsStore::new(&temp).unwrap();
     let data = b"data";
-    let hash = compute_hash(data);
+    let hash = ContentHash::of(data);
     block_on(async {
         store.write(&hash, data.to_vec(), false).await.unwrap();
         store.write(&hash, data.to_vec(), true).await.unwrap();
@@ -45,7 +45,7 @@ fn test_write_read_data() {
     let temp = temp_dir();
     let store = FsStore::new(&temp).unwrap();
     let data = b"hello world";
-    let hash = compute_hash(data);
+    let hash = ContentHash::of(data);
 
     block_on(async {
         store.write(&hash, data.to_vec(), true).await.unwrap();
@@ -67,7 +67,7 @@ fn test_write_read_node() {
     let temp = temp_dir();
     let store = FsStore::new(&temp).unwrap();
     let data = b"{\"key\": \"value\"}";
-    let hash = compute_hash(data);
+    let hash = ContentHash::of(data);
 
     block_on(async {
         store.write(&hash, data.to_vec(), false).await.unwrap();
@@ -82,7 +82,7 @@ fn test_delete() {
     let temp = temp_dir();
     let store = FsStore::new(&temp).unwrap();
     let data = b"hello world";
-    let hash = compute_hash(data);
+    let hash = ContentHash::of(data);
 
     block_on(async {
         store.write(&hash, data.to_vec(), true).await.unwrap();
@@ -101,8 +101,8 @@ fn test_enumerate_all() {
     let store = FsStore::new(&temp).unwrap();
     let data1 = b"data1";
     let data2 = b"data2";
-    let hash1 = compute_hash(data1);
-    let hash2 = compute_hash(data2);
+    let hash1 = ContentHash::of(data1);
+    let hash2 = ContentHash::of(data2);
 
     block_on(async {
         store.write(&hash1, data1.to_vec(), true).await.unwrap();
@@ -120,7 +120,7 @@ fn test_object_layout() {
     let temp = temp_dir();
     let store = FsStore::new(&temp).unwrap();
     let data = b"abcd";
-    let hash = compute_hash(data);
+    let hash = ContentHash::of(data);
     // Files are named by the SHA-256 in hex.
     let hex = "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589";
     assert_eq!(hash.to_string(), hex);

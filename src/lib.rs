@@ -9,7 +9,6 @@ use futures::{
     lock::Mutex,
     stream::{self, FuturesUnordered},
 };
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
@@ -183,7 +182,7 @@ impl<B: TreeReader> MerkleStore<B> {
             .read(&expected, hash.size_limit(), is_data)
             .await?
             .ok_or(Error::NotFound { hash: expected })?;
-        let actual = compute_hash(&data);
+        let actual = ContentHash::of(&data);
         if actual != expected {
             return Err(Error::HashMismatch { expected, actual });
         }
@@ -373,7 +372,7 @@ impl<B: TreeWriter> MerkleStore<B> {
         data: Vec<u8>,
         is_data: bool,
     ) -> MerkleResult<SizedHash, B::Error> {
-        let hash = SizedHash::new(compute_hash(&data), data.len());
+        let hash = SizedHash::new(ContentHash::of(&data), data.len());
         trace!(hash = ?hash, "write");
         self.backend.write(hash.hash(), data, is_data).await?;
         Ok(hash)
@@ -462,9 +461,4 @@ impl<B: TreeEnumerator> MerkleStore<B> {
 
         Ok(())
     }
-}
-
-/// Computes the `ContentHash` of `data`, as used for every stored object.
-fn compute_hash(data: &[u8]) -> ContentHash {
-    ContentHash::from(<[u8; 32]>::from(Sha256::digest(data)))
 }

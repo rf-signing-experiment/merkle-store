@@ -1,7 +1,4 @@
-//! Helpers shared by the tests.
-
-// Each test binary uses only some of these.
-#![allow(dead_code)]
+//! Helpers shared by the filesystem backend tests.
 
 use std::{
     fs,
@@ -10,12 +7,6 @@ use std::{
 };
 
 use merkle_store::ContentHash;
-use sha2::{Digest, Sha256};
-
-/// The `ContentHash` the store gives `data`: its SHA-256.
-pub fn compute_hash(data: &[u8]) -> ContentHash {
-    ContentHash::from(<[u8; 32]>::from(Sha256::digest(data)))
-}
 
 /// A fresh, empty directory under `target/test-tmp/`.
 pub fn temp_dir(name: &str) -> PathBuf {

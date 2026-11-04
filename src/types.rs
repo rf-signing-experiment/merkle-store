@@ -145,6 +145,11 @@ pub struct ContentHash([u8; 32]);
 impl ContentHash {
     pub(crate) const NULL: Self = Self([0; 32]);
 
+    /// The hash of `data`, as used for every stored object.
+    pub fn of(data: &[u8]) -> Self {
+        Self(Sha256::digest(data).into())
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

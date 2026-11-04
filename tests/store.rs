@@ -1,8 +1,5 @@
-mod common;
-
 use std::collections::HashSet;
 
-use common::compute_hash;
 use futures::{FutureExt, executor::block_on, lock::Mutex};
 use merkle_store::{
     ContentHash, MerkleStore, TreeEnumerator, TreeParameters, TreeReader, TreeWriter,
@@ -81,7 +78,7 @@ fn empty_file() {
 
 #[test]
 fn empty_hash_is_not_null() {
-    assert!(!compute_hash(&[]).is_null());
+    assert!(!ContentHash::of(&[]).is_null());
 }
 
 /// A MemoryStore whose tree-node writes wait on `gate` and can be made to fail.
@@ -311,8 +308,8 @@ fn gc_keeps_live_and_pending_objects() {
             .filter(|(_, is_data)| *is_data)
             .map(|(h, _)| h)
             .collect();
-        assert!(!blobs.contains(&compute_hash(b"old")));
-        assert!(blobs.contains(&compute_hash(b"c")));
+        assert!(!blobs.contains(&ContentHash::of(b"old")));
+        assert!(blobs.contains(&ContentHash::of(b"c")));
 
         store.commit().await.unwrap();
         assert_eq!(get(&store, "a").await, Some(b"new".to_vec()));
@@ -500,8 +497,8 @@ fn gc_removes_deleted_data() {
         store.gc().await.unwrap();
 
         let all = store.backend().enumerate_all().await.unwrap();
-        assert!(!all.contains(&(compute_hash(b"a"), true)));
-        assert!(all.contains(&(compute_hash(b"b"), true)));
+        assert!(!all.contains(&(ContentHash::of(b"a"), true)));
+        assert!(all.contains(&(ContentHash::of(b"b"), true)));
     });
 }
 

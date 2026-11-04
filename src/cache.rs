@@ -2,9 +2,7 @@ use std::collections::HashSet;
 
 use tracing::{error, warn};
 
-use crate::{
-    TreeEnumerator, TreeReader, TreeWriter, compute_hash, fsstore::FsStore, types::ContentHash,
-};
+use crate::{TreeEnumerator, TreeReader, TreeWriter, fsstore::FsStore, types::ContentHash};
 
 /// A cache backed by a local directory.
 pub type FsCache<R> = Cache<FsStore, R>;
@@ -53,7 +51,7 @@ impl<L: TreeWriter, R: TreeReader> TreeReader for Cache<L, R> {
         is_data: bool,
     ) -> Result<Option<Vec<u8>>, Self::Error> {
         match self.local.read(hash, size_limit, is_data).await {
-            Ok(Some(data)) if compute_hash(&data) == *hash => return Ok(Some(data)),
+            Ok(Some(data)) if ContentHash::of(&data) == *hash => return Ok(Some(data)),
             Ok(Some(_)) => {
                 // Damaged entry. Drop it and refetch from the remote.
                 warn!("cache entry {hash} is corrupt, refetching");

@@ -2,7 +2,7 @@ mod common;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use common::{compute_hash, object_path, temp_dir};
+use common::{object_path, temp_dir};
 use futures::executor::block_on;
 use merkle_store::{
     ContentHash, MerkleStore, TreeParameters, TreeReader, TreeWriter,
@@ -57,7 +57,7 @@ fn mem_cache<R>(remote: R) -> Cache<MemoryStore, R> {
 fn failed_node_write_is_retried() {
     let cache = mem_cache(Flaky::default());
     let data = b"node".to_vec();
-    let hash = compute_hash(&data);
+    let hash = ContentHash::of(&data);
     block_on(async {
         cache.remote().fail.store(true, Ordering::SeqCst);
         assert!(cache.write(&hash, data.clone(), false).await.is_err());
@@ -85,24 +85,24 @@ fn only_nodes_are_cached_on_write() {
     let blob = b"blob".to_vec();
     block_on(async {
         cache
-            .write(&compute_hash(&node), node.clone(), false)
+            .write(&ContentHash::of(&node), node.clone(), false)
             .await
             .unwrap();
         cache
-            .write(&compute_hash(&blob), blob.clone(), true)
+            .write(&ContentHash::of(&blob), blob.clone(), true)
             .await
             .unwrap();
         let local = cache.local();
         assert_eq!(
             local
-                .read(&compute_hash(&node), usize::MAX, false)
+                .read(&ContentHash::of(&node), usize::MAX, false)
                 .await
                 .unwrap(),
             Some(node)
         );
         assert_eq!(
             local
-                .read(&compute_hash(&blob), usize::MAX, true)
+                .read(&ContentHash::of(&blob), usize::MAX, true)
                 .await
                 .unwrap(),
             None
@@ -110,12 +110,12 @@ fn only_nodes_are_cached_on_write() {
 
         // Reading a blob copies it into the cache.
         cache
-            .read(&compute_hash(&blob), usize::MAX, true)
+            .read(&ContentHash::of(&blob), usize::MAX, true)
             .await
             .unwrap();
         assert_eq!(
             local
-                .read(&compute_hash(&blob), usize::MAX, true)
+                .read(&ContentHash::of(&blob), usize::MAX, true)
                 .await
                 .unwrap(),
             Some(blob)
@@ -127,7 +127,7 @@ fn only_nodes_are_cached_on_write() {
 fn write_reaches_remote_even_if_cached_locally() {
     let cache = mem_cache(MemoryStore::new());
     let data = b"blob".to_vec();
-    let hash = compute_hash(&data);
+    let hash = ContentHash::of(&data);
     block_on(async {
         cache.write(&hash, data.clone(), true).await.unwrap();
         // Read-through puts it in the local cache.
@@ -150,7 +150,7 @@ fn write_reaches_remote_even_if_cached_locally() {
 fn corrupt_cache_entry_is_refetched() {
     let cache = mem_cache(MemoryStore::new());
     let data = b"node".to_vec();
-    let hash = compute_hash(&data);
+    let hash = ContentHash::of(&data);
     block_on(async {
         cache
             .remote()
@@ -199,7 +199,7 @@ fn fs_cache_store_end_to_end() {
         // GC deletes through the cache, including objects it never cached.
         store.gc().await.unwrap();
         assert_eq!(store.get_file("a").await.unwrap(), Some(b"new".to_vec()));
-        let old = compute_hash(b"old");
+        let old = ContentHash::of(b"old");
         assert_eq!(
             store
                 .backend()
