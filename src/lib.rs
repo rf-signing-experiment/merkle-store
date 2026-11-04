@@ -25,7 +25,7 @@ use crate::types::{IndexNode, Node};
 type MerkleResult<T, E> = std::result::Result<T, Error<E>>;
 use types::NameHash;
 
-pub use crate::types::ContentHash;
+pub use crate::types::{ContentHash, SizedHash};
 
 #[derive(Clone, Copy)]
 pub struct TreeParameters {
@@ -58,9 +58,15 @@ pub trait TreeReader {
     type Error: Display + Debug + 'static;
 
     /// Reads an object by hash. Returns `None` if it doesn't exist.
+    ///
+    /// `size_limit` is the most bytes the object can have, from the size
+    /// class the tree records next to its hash. A backend can use it to avoid
+    /// reading more than that (say, from a remote that returns too much). The
+    /// store checks the hash of whatever is returned, so it may ignore it.
     fn read(
         &self,
         hash: &ContentHash,
+        size_limit: usize,
         is_data: bool,
     ) -> impl Future<Output = Result<Option<Vec<u8>>, Self::Error>>;
 }
@@ -99,7 +105,7 @@ pub struct MerkleStore<B> {
     parallel: usize,
     params: TreeParameters,
     node_cache: OneFlightCache<ContentHash, Node>,
-    root: std::sync::Mutex<Option<ContentHash>>,
+    root: std::sync::Mutex<Option<SizedHash>>,
     pending_writes: std::sync::Mutex<Vec<PendingWrite>>,
     /// Serializes commits and `set_root`. The root lock itself is only held
     /// for a moment to read or swap the root, so readers never wait on a commit.
@@ -107,7 +113,7 @@ pub struct MerkleStore<B> {
 }
 
 /// A queued change to a name: `Some(hash)` to put, `None` to delete.
-type PendingWrite = (String, Option<ContentHash>);
+type PendingWrite = (String, Option<SizedHash>);
 
 impl<B: TreeReader> MerkleStore<B> {
     /// Creates a store with no root. `parallel` caps concurrent backend
@@ -130,13 +136,13 @@ impl<B: TreeReader> MerkleStore<B> {
     }
 
     /// The current root, or `None` for an empty tree.
-    pub fn root(&self) -> Option<ContentHash> {
+    pub fn root(&self) -> Option<SizedHash> {
         *self.root.lock().unwrap()
     }
 
     /// Replaces the root. Waits for any running commit to finish first, so
     /// the commit can't overwrite it.
-    pub async fn set_root(&self, root: ContentHash) {
+    pub async fn set_root(&self, root: SizedHash) {
         let _commit = self.commit_lock.lock().await;
         *self.root.lock().unwrap() = Some(root);
     }
@@ -148,11 +154,11 @@ impl<B: TreeReader> MerkleStore<B> {
         }
     }
 
-    pub async fn get_file_by_hash(&self, hash: &ContentHash) -> MerkleResult<Vec<u8>, B::Error> {
+    pub async fn get_file_by_hash(&self, hash: &SizedHash) -> MerkleResult<Vec<u8>, B::Error> {
         self.read_object(hash, true).await
     }
 
-    pub async fn get_file_hash(&self, name: &str) -> MerkleResult<Option<ContentHash>, B::Error> {
+    pub async fn get_file_hash(&self, name: &str) -> MerkleResult<Option<SizedHash>, B::Error> {
         trace!(?name, "get_file_hash");
         let key = NameHash::new(name, 32);
         let hash = self
@@ -168,20 +174,18 @@ impl<B: TreeReader> MerkleStore<B> {
     // Reads from the store by hash.
     async fn read_object(
         &self,
-        hash: &ContentHash,
+        hash: &SizedHash,
         is_data: bool,
     ) -> MerkleResult<Vec<u8>, B::Error> {
+        let expected = *hash.hash();
         let data = self
             .backend
-            .read(hash, is_data)
+            .read(&expected, hash.size_limit(), is_data)
             .await?
-            .ok_or_else(|| Error::NotFound { hash: *hash })?;
-        let verification_hash = compute_hash(&data);
-        if hash != &verification_hash {
-            return Err(Error::HashMismatch {
-                expected: *hash,
-                actual: verification_hash,
-            });
+            .ok_or(Error::NotFound { hash: expected })?;
+        let actual = compute_hash(&data);
+        if actual != expected {
+            return Err(Error::HashMismatch { expected, actual });
         }
         Ok(data)
     }
@@ -190,7 +194,7 @@ impl<B: TreeReader> MerkleStore<B> {
     /// out (or the first leaf). Returns `None` if the path hits an empty slot.
     async fn lookup(
         &self,
-        root: Option<&ContentHash>,
+        root: Option<&SizedHash>,
         mut key: NameHash,
     ) -> MerkleResult<Option<Arc<Node>>, B::Error> {
         debug!(?key, "lookup");
@@ -216,16 +220,17 @@ impl<B: TreeReader> MerkleStore<B> {
         }
     }
 
-    async fn load_node_uncached(&self, hash: &ContentHash) -> MerkleResult<Node, B::Error> {
+    async fn load_node_uncached(&self, hash: &SizedHash) -> MerkleResult<Node, B::Error> {
         let data = self.read_object(hash, false).await?;
         let node = Node::deserialize(data);
         trace!("load node {hash}\n{node:#?}");
         Ok(node)
     }
 
-    async fn load_node(&self, hash: &ContentHash) -> MerkleResult<Arc<Node>, B::Error> {
+    async fn load_node(&self, hash: &SizedHash) -> MerkleResult<Arc<Node>, B::Error> {
+        // Keyed by the plain hash: it alone determines the node.
         self.node_cache
-            .get(hash, async |hash| self.load_node_uncached(hash).await)
+            .get(hash.hash(), async |_| self.load_node_uncached(hash).await)
             .await
     }
 }
@@ -279,9 +284,9 @@ impl<B: TreeWriter> MerkleStore<B> {
     /// never been added. If nothing is left, the new root is `None`.
     async fn build_tree(
         &self,
-        root: Option<ContentHash>,
+        root: Option<SizedHash>,
         pending: Vec<PendingWrite>,
-    ) -> MerkleResult<Option<ContentHash>, B::Error> {
+    ) -> MerkleResult<Option<SizedHash>, B::Error> {
         let TreeParameters { depth, breadth } = self.params;
 
         // Group the edits by leaf. Order within a leaf is kept, so the last
@@ -307,8 +312,7 @@ impl<B: TreeWriter> MerkleStore<B> {
         // Index levels, bottom-up. Each pass groups the new hashes from the
         // level below by parent and rewrites those parents.
         for d in (0..depth).rev() {
-            let mut parents: HashMap<NameHash, Vec<(NameHash, Option<ContentHash>)>> =
-                HashMap::new();
+            let mut parents: HashMap<NameHash, Vec<(NameHash, Option<SizedHash>)>> = HashMap::new();
             for (key, hash) in level {
                 let (slot, parent) = key.split(breadth * d);
                 parents.entry(parent).or_default().push((slot, hash));
@@ -340,10 +344,10 @@ impl<B: TreeWriter> MerkleStore<B> {
     /// time. Returns each key's new hash, or `None` if the node ended up empty.
     async fn write_level<E>(
         &self,
-        root: Option<ContentHash>,
+        root: Option<SizedHash>,
         edits: HashMap<NameHash, E>,
         edit: impl Fn(Option<&Node>, E) -> Node,
-    ) -> MerkleResult<HashMap<NameHash, Option<ContentHash>>, B::Error> {
+    ) -> MerkleResult<HashMap<NameHash, Option<SizedHash>>, B::Error> {
         debug!(nodes = edits.len(), "commit:writing level");
         let edit = &edit;
         stream::iter(edits)
@@ -368,14 +372,14 @@ impl<B: TreeWriter> MerkleStore<B> {
         &self,
         data: Vec<u8>,
         is_data: bool,
-    ) -> MerkleResult<ContentHash, B::Error> {
-        let hash = compute_hash(&data);
+    ) -> MerkleResult<SizedHash, B::Error> {
+        let hash = SizedHash::new(compute_hash(&data), data.len());
         trace!(hash = ?hash, "write");
-        self.backend.write(&hash, data, is_data).await?;
+        self.backend.write(hash.hash(), data, is_data).await?;
         Ok(hash)
     }
 
-    async fn write_node(&self, node: &Node) -> MerkleResult<ContentHash, B::Error> {
+    async fn write_node(&self, node: &Node) -> MerkleResult<SizedHash, B::Error> {
         trace!(?node, "write_node");
         let data = node.serialize();
         self.write_object(data, false).await
@@ -384,7 +388,7 @@ impl<B: TreeWriter> MerkleStore<B> {
 
 impl<B: TreeReader> MerkleStore<B> {
     /// Lists every name in the tree with its data hash.
-    pub async fn enumerate(&self) -> MerkleResult<Vec<(String, ContentHash)>, B::Error> {
+    pub async fn enumerate(&self) -> MerkleResult<Vec<(String, SizedHash)>, B::Error> {
         let mut names = Vec::new();
         self.walk(|_, node| {
             if let Node::Leaf(leaf) = node {
@@ -397,11 +401,11 @@ impl<B: TreeReader> MerkleStore<B> {
 
     /// Calls `visit` with every node reachable from the root, loading nodes
     /// concurrently.
-    async fn walk(&self, mut visit: impl FnMut(&ContentHash, &Node)) -> MerkleResult<(), B::Error> {
+    async fn walk(&self, mut visit: impl FnMut(&SizedHash, &Node)) -> MerkleResult<(), B::Error> {
         let Some(root) = self.root() else {
             return Ok(());
         };
-        let load = async |hash: ContentHash| {
+        let load = async |hash: SizedHash| {
             let node = self.load_node(&hash).await?;
             MerkleResult::<_, B::Error>::Ok((hash, node))
         };
@@ -434,15 +438,15 @@ impl<B: TreeEnumerator> MerkleStore<B> {
 
         let mut live = HashSet::new();
         self.walk(|hash, node| {
-            live.insert((*hash, false));
+            live.insert((*hash.hash(), false));
             if let Node::Leaf(leaf) = node {
-                live.extend(leaf.iter().map(|(_, hash)| (*hash, true)));
+                live.extend(leaf.iter().map(|(_, hash)| (*hash.hash(), true)));
             }
         })
         .await?;
         for (_, hash) in self.pending_writes.get_mut().unwrap().iter() {
             if let Some(hash) = hash {
-                live.insert((*hash, true));
+                live.insert((*hash.hash(), true));
             }
         }
         debug!(live = live.len(), "live objects enumerated");
@@ -462,5 +466,5 @@ impl<B: TreeEnumerator> MerkleStore<B> {
 
 /// Computes the `ContentHash` of `data`, as used for every stored object.
 pub fn compute_hash(data: &[u8]) -> ContentHash {
-    ContentHash::from_sha256(data.len(), Sha256::digest(data).into())
+    ContentHash::from(<[u8; 32]>::from(Sha256::digest(data)))
 }

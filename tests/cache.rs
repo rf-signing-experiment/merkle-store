@@ -24,9 +24,10 @@ impl TreeReader for Flaky {
     async fn read(
         &self,
         hash: &ContentHash,
+        size_limit: usize,
         is_data: bool,
     ) -> Result<Option<Vec<u8>>, Self::Error> {
-        Ok(self.inner.read(hash, is_data).await.unwrap())
+        Ok(self.inner.read(hash, size_limit, is_data).await.unwrap())
     }
 }
 
@@ -61,11 +62,19 @@ fn failed_node_write_is_retried() {
     block_on(async {
         cache.remote().fail.store(true, Ordering::SeqCst);
         assert!(cache.write(&hash, data.clone(), false).await.is_err());
-        assert_eq!(cache.local().read(&hash, false).await.unwrap(), None);
+        assert_eq!(
+            cache.local().read(&hash, usize::MAX, false).await.unwrap(),
+            None
+        );
 
         cache.remote().fail.store(false, Ordering::SeqCst);
         cache.write(&hash, data.clone(), false).await.unwrap();
-        let stored = cache.remote().inner.read(&hash, false).await.unwrap();
+        let stored = cache
+            .remote()
+            .inner
+            .read(&hash, usize::MAX, false)
+            .await
+            .unwrap();
         assert_eq!(stored, Some(data));
     });
 }
@@ -86,15 +95,30 @@ fn only_nodes_are_cached_on_write() {
             .unwrap();
         let local = cache.local();
         assert_eq!(
-            local.read(&compute_hash(&node), false).await.unwrap(),
+            local
+                .read(&compute_hash(&node), usize::MAX, false)
+                .await
+                .unwrap(),
             Some(node)
         );
-        assert_eq!(local.read(&compute_hash(&blob), true).await.unwrap(), None);
+        assert_eq!(
+            local
+                .read(&compute_hash(&blob), usize::MAX, true)
+                .await
+                .unwrap(),
+            None
+        );
 
         // Reading a blob copies it into the cache.
-        cache.read(&compute_hash(&blob), true).await.unwrap();
+        cache
+            .read(&compute_hash(&blob), usize::MAX, true)
+            .await
+            .unwrap();
         assert_eq!(
-            local.read(&compute_hash(&blob), true).await.unwrap(),
+            local
+                .read(&compute_hash(&blob), usize::MAX, true)
+                .await
+                .unwrap(),
             Some(blob)
         );
     });
@@ -108,12 +132,18 @@ fn write_reaches_remote_even_if_cached_locally() {
     block_on(async {
         cache.write(&hash, data.clone(), true).await.unwrap();
         // Read-through puts it in the local cache.
-        assert_eq!(cache.read(&hash, true).await.unwrap(), Some(data.clone()));
+        assert_eq!(
+            cache.read(&hash, usize::MAX, true).await.unwrap(),
+            Some(data.clone())
+        );
 
         // Another client deletes it from the remote, then we write it again.
         cache.remote().delete(&hash, true).await.unwrap();
         cache.write(&hash, data.clone(), true).await.unwrap();
-        assert_eq!(cache.remote().read(&hash, true).await.unwrap(), Some(data));
+        assert_eq!(
+            cache.remote().read(&hash, usize::MAX, true).await.unwrap(),
+            Some(data)
+        );
     });
 }
 
@@ -134,8 +164,14 @@ fn corrupt_cache_entry_is_refetched() {
             .await
             .unwrap();
 
-        assert_eq!(cache.read(&hash, false).await.unwrap(), Some(data.clone()));
-        assert_eq!(cache.local().read(&hash, false).await.unwrap(), Some(data));
+        assert_eq!(
+            cache.read(&hash, usize::MAX, false).await.unwrap(),
+            Some(data.clone())
+        );
+        assert_eq!(
+            cache.local().read(&hash, usize::MAX, false).await.unwrap(),
+            Some(data)
+        );
     });
 }
 
@@ -159,14 +195,19 @@ fn fs_cache_store_end_to_end() {
 
         // The root node was cached in the local directory.
         let root = store.root().unwrap();
-        assert!(object_path(&dir, &root, false).exists());
+        assert!(object_path(&dir, root.hash(), false).exists());
 
         // GC deletes through the cache, including objects it never cached.
         store.gc().await.unwrap();
         assert_eq!(store.get_file("a").await.unwrap(), Some(b"new".to_vec()));
         let old = compute_hash(b"old");
         assert_eq!(
-            store.backend().remote().read(&old, true).await.unwrap(),
+            store
+                .backend()
+                .remote()
+                .read(&old, usize::MAX, true)
+                .await
+                .unwrap(),
             None
         );
     });

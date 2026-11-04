@@ -94,9 +94,10 @@ impl TreeReader for Gated {
     async fn read(
         &self,
         hash: &ContentHash,
+        size_limit: usize,
         is_data: bool,
     ) -> Result<Option<Vec<u8>>, Self::Error> {
-        Ok(self.inner.read(hash, is_data).await.unwrap())
+        Ok(self.inner.read(hash, size_limit, is_data).await.unwrap())
     }
 }
 
@@ -119,6 +120,81 @@ impl TreeWriter for Gated {
     async fn delete(&self, hash: &ContentHash, is_data: bool) -> Result<(), Self::Error> {
         self.inner.delete(hash, is_data).await.unwrap();
         Ok(())
+    }
+}
+
+/// A MemoryStore that checks every read gets the tightest size limit for
+/// the object it returns, and counts the reads.
+#[derive(Default)]
+struct SizeChecked {
+    inner: MemoryStore,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl TreeReader for SizeChecked {
+    type Error = std::convert::Infallible;
+    async fn read(
+        &self,
+        hash: &ContentHash,
+        size_limit: usize,
+        is_data: bool,
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        let data = self.inner.read(hash, size_limit, is_data).await?;
+        if let Some(data) = &data {
+            let len = data.len();
+            // The limit is `2^size_class - 1`, the largest length in the class.
+            assert!(
+                len <= size_limit && size_limit <= (2 * len).saturating_sub(1),
+                "size_limit {size_limit} for {len} bytes (is_data: {is_data})"
+            );
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(data)
+    }
+}
+
+impl TreeWriter for SizeChecked {
+    async fn write(
+        &self,
+        hash: &ContentHash,
+        data: Vec<u8>,
+        is_data: bool,
+    ) -> Result<(), Self::Error> {
+        self.inner.write(hash, data, is_data).await
+    }
+    async fn delete(&self, hash: &ContentHash, is_data: bool) -> Result<(), Self::Error> {
+        self.inner.delete(hash, is_data).await
+    }
+}
+
+#[test]
+fn reads_get_size_limit_from_tree() {
+    for depth in [0, 2] {
+        block_on(async {
+            let store = MerkleStore::new(
+                SizeChecked::default(),
+                4,
+                TreeParameters { depth, breadth: 4 },
+            );
+            // Lengths in different size classes, including the edges of one.
+            let files = [vec![], vec![1], vec![2; 1023], vec![3; 1024]];
+            for (i, data) in files.iter().enumerate() {
+                store
+                    .put_object(&format!("f{i}"), data.clone())
+                    .await
+                    .unwrap();
+            }
+            store.commit().await.unwrap();
+            for (i, data) in files.iter().enumerate() {
+                assert_eq!(get(&store, &format!("f{i}")).await, Some(data.clone()));
+            }
+            // Every file's data, plus at least the root node.
+            let reads = store
+                .backend()
+                .reads
+                .load(std::sync::atomic::Ordering::SeqCst);
+            assert!(reads > files.len(), "only {reads} reads");
+        });
     }
 }
 

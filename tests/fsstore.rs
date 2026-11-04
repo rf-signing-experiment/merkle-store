@@ -49,10 +49,16 @@ fn test_write_read_data() {
 
     block_on(async {
         store.write(&hash, data.to_vec(), true).await.unwrap();
-        let read_data = store.read(&hash, true).await.unwrap().unwrap();
+        let read_data = store.read(&hash, usize::MAX, true).await.unwrap().unwrap();
         assert_eq!(read_data, data);
         // The same hash in the other namespace is a different object.
-        assert!(store.read(&hash, false).await.unwrap().is_none());
+        assert!(
+            store
+                .read(&hash, usize::MAX, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
     });
 }
 
@@ -65,9 +71,9 @@ fn test_write_read_node() {
 
     block_on(async {
         store.write(&hash, data.to_vec(), false).await.unwrap();
-        let read_data = store.read(&hash, false).await.unwrap().unwrap();
+        let read_data = store.read(&hash, usize::MAX, false).await.unwrap().unwrap();
         assert_eq!(read_data, data);
-        assert!(store.read(&hash, true).await.unwrap().is_none());
+        assert!(store.read(&hash, usize::MAX, true).await.unwrap().is_none());
     });
 }
 
@@ -80,11 +86,11 @@ fn test_delete() {
 
     block_on(async {
         store.write(&hash, data.to_vec(), true).await.unwrap();
-        let read_data = store.read(&hash, true).await.unwrap().unwrap();
+        let read_data = store.read(&hash, usize::MAX, true).await.unwrap().unwrap();
         assert_eq!(read_data, data);
 
         store.delete(&hash, true).await.unwrap();
-        let result = store.read(&hash, true).await.unwrap();
+        let result = store.read(&hash, usize::MAX, true).await.unwrap();
         assert!(result.is_none());
     });
 }
@@ -115,9 +121,9 @@ fn test_object_layout() {
     let store = FsStore::new(&temp).unwrap();
     let data = b"abcd";
     let hash = compute_hash(data);
-    // Files are named by the plain SHA-256, without the size class byte.
+    // Files are named by the SHA-256 in hex.
     let hex = "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589";
-    assert_eq!(&hash.to_string()[2..], hex);
+    assert_eq!(hash.to_string(), hex);
 
     block_on(async {
         store.write(&hash, data.to_vec(), true).await.unwrap();
@@ -129,30 +135,4 @@ fn test_object_layout() {
         data
     );
     assert_eq!(fs::read(temp.join("tree").join(hex)).unwrap(), data);
-}
-
-#[test]
-fn test_enumerate_all_restores_size_class() {
-    let temp = temp_dir();
-    let store = FsStore::new(&temp).unwrap();
-    // Lengths 0, 1 and 1000 have different size classes.
-    let objects = [vec![], vec![7], vec![1; 1000]];
-    block_on(async {
-        for data in &objects {
-            store
-                .write(&compute_hash(data), data.clone(), true)
-                .await
-                .unwrap();
-            store
-                .write(&compute_hash(data), data.clone(), false)
-                .await
-                .unwrap();
-        }
-        let all = store.enumerate_all().await.unwrap();
-        let expected: HashSet<_> = objects
-            .iter()
-            .flat_map(|d| [(compute_hash(d), true), (compute_hash(d), false)])
-            .collect();
-        assert_eq!(all, expected);
-    });
 }

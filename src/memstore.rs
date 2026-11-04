@@ -21,7 +21,12 @@ impl MemoryStore {
 impl TreeReader for MemoryStore {
     type Error = Infallible;
 
-    async fn read(&self, hash: &ContentHash, is_data: bool) -> Result<Option<Vec<u8>>, Infallible> {
+    async fn read(
+        &self,
+        hash: &ContentHash,
+        _size_limit: usize,
+        is_data: bool,
+    ) -> Result<Option<Vec<u8>>, Infallible> {
         Ok(self.objects.lock().unwrap().get(&(*hash, is_data)).cloned())
     }
 }

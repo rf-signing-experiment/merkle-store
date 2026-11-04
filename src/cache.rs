@@ -49,9 +49,10 @@ impl<L: TreeWriter, R: TreeReader> TreeReader for Cache<L, R> {
     async fn read(
         &self,
         hash: &ContentHash,
+        size_limit: usize,
         is_data: bool,
     ) -> Result<Option<Vec<u8>>, Self::Error> {
-        match self.local.read(hash, is_data).await {
+        match self.local.read(hash, size_limit, is_data).await {
             Ok(Some(data)) if compute_hash(&data) == *hash => return Ok(Some(data)),
             Ok(Some(_)) => {
                 // Damaged entry. Drop it and refetch from the remote.
@@ -63,7 +64,7 @@ impl<L: TreeWriter, R: TreeReader> TreeReader for Cache<L, R> {
             Ok(None) => {}
             Err(e) => error!("cache read {hash}: {e}"),
         }
-        let data = self.remote.read(hash, is_data).await?;
+        let data = self.remote.read(hash, size_limit, is_data).await?;
         if let Some(data) = &data {
             self.cache_write(hash, data.clone(), is_data).await;
         }
